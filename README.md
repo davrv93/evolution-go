@@ -68,7 +68,27 @@ aislando la variable); `-s -w` solo encoge el binario. El efecto de `GOGC=50`
 y de no descargar el HistorySync **solo aparece con una sesión vinculada**, que
 aquí no hay: el heap vivo en reposo sin sesión es demasiado pequeño para verlo.
 
-<!-- PROD -->
+### Producción (EC2 3.130.244.177, 25-09-2026)
+
+Lecturas de `docker stats` en el servidor, mismo día. Las dos instancias de
+evolution-go estaban **desconectadas** (sin sesión) en las dos lecturas del Go,
+así que comparan arranque contra arranque, no contra la operación con sesión.
+
+| Contenedor | RAM | Nota |
+|---|---:|---|
+| `pjg_evolution_api` (Evolution API, Node) | 252,6 MiB | + `pjg_evolution_postgres` 53,6 MiB. Lo que se retira. |
+| `pjg_evolution_go` antes de todo | 93,4 MiB | con 1 sesión (tabla siguiente) |
+| `pjg_evolution_go` tras `7e6dd48` | 76,4 MiB | con 1 sesión (tabla siguiente) |
+| `pjg_evolution_go` tras `7e6dd48`, recreado, 0 sesiones, a los 30 min | 46,8 MiB | cgroup 47,7 MiB |
+| **`pjg_evolution_go` esta versión, 0 sesiones, a los 5 min** | **8,1 MiB** | cgroup 9,1 MiB, pico 12,7 MiB; imagen 301 → 248 MB |
+| `pjg_evolution_go_postgres` | 66,0 MiB | no cambia con esta versión |
+| `pjg_boticalima2_backend` (Laravel, PHP-FPM) | 138–150 MiB | el que atiende los webhooks |
+| `pjg_emanuelpharma_backend` (Laravel) | 110–126 MiB | |
+| `app_backend` (Laravel, apex) | 52–55 MiB | |
+| `pjg_boticalima2_backend_go` (pod Go de boticas) | 8,0 MiB | |
+
+Falta la lectura con sesión vinculada: es donde actúan `GOGC=50` y no
+descargar el HistorySync. Se toma cuando se vincule un número en esta versión.
 
 ## Tres métricas de producción
 
