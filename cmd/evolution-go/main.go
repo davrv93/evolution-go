@@ -71,6 +71,30 @@ var devMode = flag.Bool("dev", false, "Enable development mode")
 
 var version = "0.0.0"
 
+// Valores por defecto del recolector cuando el entorno no fija los estándar
+// del runtime (GOGC / GOMEMLIMIT). GOGC=50 mantiene el heap en ~1,5x lo vivo
+// en vez de 2x (menos RSS en reposo a cambio de algo más de CPU, que sobra en
+// el EC2); el límite blando hace que el GC apriete antes de tocar el techo
+// del cgroup (128 MiB en producción). Se ajustan en el compose sin recompilar.
+const (
+	defaultGCPercent   = 50
+	defaultMemoryLimit = 96 << 20 // 96 MiB
+)
+
+func tuneRuntime() {
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(defaultGCPercent)
+	}
+	if os.Getenv("GOMEMLIMIT") == "" {
+		debug.SetMemoryLimit(defaultMemoryLimit)
+	}
+	// Gin en modo debug imprime cada ruta al arrancar y guarda más estado por
+	// petición; release es lo que corresponde en producción. GIN_MODE manda.
+	if os.Getenv(gin.EnvGinMode) == "" {
+		gin.SetMode(gin.ReleaseMode)
+	}
+}
+
 func init() {
 	// ldflags -X main.version= sets this at compile time.
 	// If not set (or still default), try reading from VERSION file.
@@ -130,7 +154,7 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 		)
 	}
 
-	webhookProducer := webhook_producer.NewWebhookProducer(config.WebhookUrl, loggerWrapper)
+	webhookProducer := webhook_producer.NewWebhookProducer(config.WebhookUrl, config.WebhookTimeout, loggerWrapper)
 	websocketProducer := websocket_producer.NewWebsocketProducer(loggerWrapper)
 
 	// Cria filas globais se o RabbitMQ global estiver habilitado
@@ -356,6 +380,7 @@ func main() {
 		}
 	}
 
+	tuneRuntime()
 	cfg := config.Load()
 
 	logger.LogInfo("Starting Evolution GO version %s", version)

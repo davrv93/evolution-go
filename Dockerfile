@@ -15,7 +15,13 @@ RUN go mod download
 COPY . .
 
 ARG VERSION=dev
-RUN CGO_ENABLED=1 go build -ldflags "-X main.version=${VERSION}" -o server ./cmd/evolution-go
+# `noswagger` deja fuera del binario la UI y el spec de Swagger (~10 MB de
+# binario; Laravel no los usa). Para volver a tenerlos: --build-arg GO_TAGS="".
+ARG GO_TAGS=noswagger
+# -trimpath y -s -w quitan rutas de compilación, tabla de símbolos y DWARF:
+# menos imagen y menos páginas que mapear; no cambian el comportamiento.
+RUN CGO_ENABLED=1 go build -trimpath -tags "${GO_TAGS}" \
+    -ldflags "-s -w -X main.version=${VERSION}" -o server ./cmd/evolution-go
 
 FROM alpine:3.19.1 AS final
 

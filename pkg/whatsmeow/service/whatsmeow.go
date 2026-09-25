@@ -403,6 +403,14 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 	clientLog := waLog.Stdout("Client", minLevel, true)
 	client := whatsmeow.NewClient(deviceStore, clientLog)
 
+	// El historial que manda el teléfono al vincular/reconectar llega como
+	// blobs cifrados que whatsmeow descarga, descomprime y decodifica enteros
+	// en memoria (decenas de MB por chunk en cuentas con años de chats). Aquí
+	// nadie lo consume: el evento HistorySync sale sin datos y Laravel guarda
+	// su propio buzón. Con ManualHistorySyncDownload whatsmeow acusa recibo de
+	// la notificación y no descarga nada. HISTORY_SYNC_DOWNLOAD=true lo revierte.
+	client.ManualHistorySyncDownload = !w.config.HistorySyncDownload
+
 	w.clientPointer[cd.Instance.Id] = client
 
 	if cd.IsProxy {

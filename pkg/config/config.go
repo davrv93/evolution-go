@@ -76,6 +76,14 @@ type Config struct {
 	QrcodeMaxCount       int
 	CheckUserExists      bool
 
+	// HistorySyncDownload: si whatsmeow descarga y decodifica los blobs de
+	// historial que manda el teléfono al vincular/reconectar. Apagado por
+	// defecto: el fork no los usa y cada chunk puede pesar decenas de MB.
+	HistorySyncDownload bool
+	// WebhookTimeout acota cada POST saliente; sin tope, un receptor colgado
+	// retiene goroutine, socket y payload indefinidamente (x5 reintentos).
+	WebhookTimeout time.Duration
+
 	// Logger configurations
 	LogMaxSize    int
 	LogMaxBackups int
@@ -286,6 +294,19 @@ func Load() *Config {
 		checkUserExists = "true"
 	}
 
+	historySyncDownload := os.Getenv(config_env.HISTORY_SYNC_DOWNLOAD) == "true"
+
+	// 90 s: por encima de lo que nginx/php-fpm dejan vivir una petición
+	// (60 s), así el tope no añade reintentos que hoy no existan.
+	webhookTimeout := 90 * time.Second
+	if raw := os.Getenv(config_env.WEBHOOK_TIMEOUT_SECONDS); raw != "" {
+		if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
+			webhookTimeout = time.Duration(secs) * time.Second
+		} else {
+			logger.LogWarn("[CONFIG] %s=%q inválido, se usa %s", config_env.WEBHOOK_TIMEOUT_SECONDS, raw, webhookTimeout)
+		}
+	}
+
 	// Convertendo para int com valores padrão caso estejam vazios
 	major := 0
 	if whatsappVersionMajor != "" {
@@ -381,6 +402,8 @@ func Load() *Config {
 		EventIgnoreStatus:    eventIgnoreStatus == "true",
 		QrcodeMaxCount:       qrMaxCount,
 		CheckUserExists:      checkUserExists != "false", // Default true, set to false to disable
+		HistorySyncDownload:  historySyncDownload,
+		WebhookTimeout:       webhookTimeout,
 		AmqpGlobalEvents:     amqpGlobalEvents,
 		AmqpSpecificEvents:   amqpSpecificEvents,
 		NatsUrl:              natsUrl,

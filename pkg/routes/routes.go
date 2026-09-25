@@ -4,10 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	swaggerFiles "github.com/swaggo/files"
-	ginSwagger "github.com/swaggo/gin-swagger"
 
-	_ "github.com/evolution-foundation/evolution-go/docs"
 	call_handler "github.com/evolution-foundation/evolution-go/pkg/call/handler"
 	chat_handler "github.com/evolution-foundation/evolution-go/pkg/chat/handler"
 	community_handler "github.com/evolution-foundation/evolution-go/pkg/community/handler"
@@ -57,7 +54,9 @@ func (r *Routes) AssignRoutes(eng *gin.Engine) {
 		c.Next()
 	})
 
-	eng.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+	// Swagger UI + spec: se compila solo sin la etiqueta `noswagger`
+	// (ver swagger_on.go / swagger_off.go). En producción va fuera.
+	registerSwagger(eng)
 
 	eng.GET("/favicon.ico", func(c *gin.Context) {
 		c.Status(http.StatusNoContent)

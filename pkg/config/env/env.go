@@ -46,6 +46,11 @@ const (
 	QRCODE_MAX_COUNT        = "QRCODE_MAX_COUNT"
 	CHECK_USER_EXISTS       = "CHECK_USER_EXISTS"
 
+	// Memoria: descarga del historial de chats (HistorySync) y tope de espera
+	// de los webhooks salientes. Ver README, "Perfil de recursos".
+	HISTORY_SYNC_DOWNLOAD   = "HISTORY_SYNC_DOWNLOAD"
+	WEBHOOK_TIMEOUT_SECONDS = "WEBHOOK_TIMEOUT_SECONDS"
+
 	// Logger configurations
 	LOG_MAX_SIZE    = "LOG_MAX_SIZE"
 	LOG_MAX_BACKUPS = "LOG_MAX_BACKUPS"

@@ -1,11 +1,16 @@
 package message_handler
 
 import (
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 
 	instance_model "github.com/evolution-foundation/evolution-go/pkg/instance/model"
 	message_service "github.com/evolution-foundation/evolution-go/pkg/message/service"
 	"github.com/gin-gonic/gin"
+	"github.com/vincent-petithory/dataurl"
 )
 
 type MessageHandler interface {
@@ -252,12 +257,70 @@ func (m *messageHandler) DownloadMedia(ctx *gin.Context) {
 		return
 	}
 
-	responseData := gin.H{
-		"base64":    dataUrl.String(),
-		"timestamp": ts,
+	// Antes: dataUrl.String() (1,33x el medio) + json.Marshal de todo el
+	// cuerpo (otro 1,33x, con crecimiento por duplicación) sobre el medio ya
+	// en memoria: un PDF de 20 MB llegaba a ~90 MB de pico en un contenedor de
+	// 128 MiB. Ahora el base64 se codifica directamente sobre la respuesta y el
+	// pico queda en el medio más unos KB. El JSON es byte a byte el mismo.
+	ctx.Header("Content-Type", "application/json; charset=utf-8")
+	ctx.Status(http.StatusOK)
+	if err := writeDownloadMediaJSON(ctx.Writer, dataUrl, ts); err != nil {
+		// La cabecera ya salió: no hay forma de cambiar el estado, solo anotar.
+		_ = ctx.Error(err)
+	}
+}
+
+// writeDownloadMediaJSON escribe exactamente lo que producía
+// ctx.JSON(200, gin.H{"message":"success","data":gin.H{"base64":dataUrl.String(),"timestamp":ts}})
+// —mismas claves, mismo orden, mismo escapado— sin materializar la cadena
+// data-URI ni el cuerpo completo. El prefijo (mime, que llega del remitente
+// del mensaje) pasa por json.Marshal para conservar el escapado; el alfabeto
+// base64 no contiene nada que JSON tenga que escapar.
+func writeDownloadMediaJSON(w io.Writer, dataUrl *dataurl.DataURL, ts string) error {
+	if dataUrl == nil {
+		return errors.New("downloadmedia: data url nula")
+	}
+	if dataUrl.Encoding != dataurl.EncodingBase64 {
+		// dataurl.New siempre usa base64; si algún día no, cae al camino lento.
+		body, err := json.Marshal(gin.H{"message": "success", "data": gin.H{"base64": dataUrl.String(), "timestamp": ts}})
+		if err != nil {
+			return err
+		}
+		_, err = w.Write(body)
+		return err
 	}
 
-	ctx.JSON(http.StatusOK, gin.H{"message": "success", "data": responseData})
+	prefix, err := json.Marshal("data:" + dataUrl.MediaType.String() + ";base64,")
+	if err != nil {
+		return err
+	}
+	prefix = prefix[:len(prefix)-1] // sin la comilla de cierre: el base64 sigue dentro de la misma cadena
+	tsJSON, err := json.Marshal(ts)
+	if err != nil {
+		return err
+	}
+
+	if _, err := io.WriteString(w, `{"data":{"base64":`); err != nil {
+		return err
+	}
+	if _, err := w.Write(prefix); err != nil {
+		return err
+	}
+	enc := base64.NewEncoder(base64.StdEncoding, w)
+	if _, err := enc.Write(dataUrl.Data); err != nil {
+		return err
+	}
+	if err := enc.Close(); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, `","timestamp":`); err != nil {
+		return err
+	}
+	if _, err := w.Write(tsJSON); err != nil {
+		return err
+	}
+	_, err = io.WriteString(w, `},"message":"success"}`)
+	return err
 }
 
 // GetMessageStatus get message status

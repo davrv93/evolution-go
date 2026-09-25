@@ -13,17 +13,29 @@ import (
 	logger_wrapper "github.com/evolution-foundation/evolution-go/pkg/logger"
 )
 
+// maxResponseBytes acota lo que se lee (y se loguea) de la respuesta del
+// receptor: una página de error HTML de Laravel en modo debug pesa cientos
+// de KB y solo sirve para el log.
+const maxResponseBytes = 64 << 10
+
 type webhookProducer struct {
 	url           string
+	client        *http.Client
 	loggerWrapper *logger_wrapper.LoggerManager
 }
 
 func NewWebhookProducer(
 	url string,
+	timeout time.Duration,
 	loggerWrapper *logger_wrapper.LoggerManager,
 ) producer_interfaces.Producer {
+	// Un solo cliente para todos los envíos: reutiliza conexiones (antes se
+	// creaba un http.Client por POST) y pone tope a cada intento. Sin tope,
+	// un receptor colgado retenía goroutine, socket y payload para siempre,
+	// multiplicado por los cinco reintentos.
 	return &webhookProducer{
 		url:           url,
+		client:        &http.Client{Timeout: timeout},
 		loggerWrapper: loggerWrapper,
 	}
 }
@@ -65,21 +77,20 @@ func (p *webhookProducer) sendWebhookWithRetry(url string, body []byte, maxRetri
 }
 
 func (p *webhookProducer) sendWebhook(url string, body []byte, userID string) (error, []byte, int) {
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
 	if err != nil {
 		return err, nil, 0
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := p.client.Do(req)
 	if err != nil {
 		return err, nil, 0
 	}
 	defer resp.Body.Close()
 
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return fmt.Errorf("erro ao ler resposta: %v", err), nil, 0
 	}
