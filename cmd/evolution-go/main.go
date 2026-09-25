@@ -82,7 +82,7 @@ func init() {
 	}
 }
 
-func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.Config, conn *amqp.Connection, exPath string, runtimeCtx *core.RuntimeContext) *gin.Engine {
+func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.Config, conn *amqp.Connection, exPath string) *gin.Engine {
 	killChannel := make(map[string](chan bool))
 	clientPointer := make(map[string]*whatsmeow.Client)
 
@@ -216,10 +216,14 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 		c.Next()
 	})
 
-	r.Use(core.GateMiddleware(runtimeCtx))
-
-	// License routes (always accessible, even without license)
-	core.LicenseRoutes(r, runtimeCtx)
+	// Fork sin licencia/telemetria (davrv93/evolution-go): el gate de
+	// activacion (core.GateMiddleware, devolvia 503 sin activar) y las
+	// rutas de licencia (core.LicenseRoutes, /manager/login) se quitan a
+	// proposito para uso autoalojado sin llamada a servidores externos.
+	// Apache 2.0 + condiciones del LICENSE (logo de frontend, aviso de uso)
+	// lo permiten -- no se usa frontend de Evolution Go aqui, y el aviso de
+	// uso vive en DOCUMENTACION_SISTEMA_PjgFactSalud.md del proyecto que lo
+	// consume.
 
 	// Passkey ceremony routes — PUBLIC (called by the browser extension from the
 	// web.whatsapp.com origin, gated only by an opaque ephemeral token).
@@ -342,8 +346,6 @@ func main() {
 
 	logger.LogInfo("Starting Evolution GO version %s", version)
 
-	startTime := time.Now()
-
 	db, err := cfg.CreateUsersDB()
 	if err != nil {
 		log.Fatal(err)
@@ -369,13 +371,13 @@ func main() {
 
 	migrate(db)
 
-	// Initialize core DB + license runtime
+	// Initialize core DB (runtime_configs sigue migrandose por si algo mas
+	// del paquete core lo espera; el runtime de licencia en si no se usa
+	// -- ver el aviso en setupRouter).
 	core.SetDB(db)
 	if err := core.MigrateDB(); err != nil {
 		log.Fatal("Failed to migrate runtime_configs: ", err)
 	}
-	tier := "evolution-go"
-	runtimeCtx := core.InitializeRuntime(tier, version, cfg.GlobalApiKey)
 
 	var conn *amqp.Connection
 
@@ -405,13 +407,7 @@ func main() {
 		logger.LogInfo("RabbitMQ URL not configured, skipping RabbitMQ connection")
 	}
 
-	r := setupRouter(db, authDB, sqliteDB, cfg, conn, exPath, runtimeCtx)
-
-	// Graceful shutdown with heartbeat
-	heartbeatCtx, heartbeatCancel := context.WithCancel(context.Background())
-	defer heartbeatCancel()
-
-	core.StartHeartbeat(heartbeatCtx, runtimeCtx, startTime)
+	r := setupRouter(db, authDB, sqliteDB, cfg, conn, exPath)
 
 	srv := &http.Server{
 		Addr:    ":" + os.Getenv("SERVER_PORT"),
@@ -430,11 +426,6 @@ func main() {
 
 	<-quit
 	logger.LogInfo("[SHUTDOWN] Signal received, shutting down...")
-
-	// Stop heartbeat loop
-	heartbeatCancel()
-
-	core.Shutdown(runtimeCtx)
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
