@@ -8,6 +8,8 @@ on:
 jobs:
   build_deploy:
     name: Build and Deploy
+    # Forks must not publish into the upstream evoapicloud Docker Hub namespace.
+    if: github.repository == 'evolution-foundation/evolution-go'
     runs-on: ubuntu-latest
     permissions:
       contents: read

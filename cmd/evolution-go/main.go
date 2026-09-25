@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -162,7 +163,7 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 	messageRepository := message_repository.NewMessageRepository(db)
 	labelRepository := label_repository.NewLabelRepository(db)
 
-	whatsmeowService := whatsmeow_service.NewWhatsmeowService(
+	whatsmeowService, err := whatsmeow_service.NewWhatsmeowService(
 		instanceRepository,
 		authDB,
 		message_repository.NewMessageRepository(db),
@@ -179,6 +180,9 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 		natsProducer,
 		loggerWrapper,
 	)
+	if err != nil {
+		log.Fatal(err)
+	}
 	instanceService := instance_service.NewInstanceService(
 		instanceRepository,
 		killChannel,
@@ -273,6 +277,20 @@ func migrate(db *gorm.DB) {
 	}
 }
 
+func reclaimMemoryPeriodically(stop <-chan struct{}) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			debug.FreeOSMemory()
+		case <-stop:
+			return
+		}
+	}
+}
+
 func initAuthDB(config *config.Config) (*sql.DB, string, error) {
 	if config.PostgresAuthDB != "" {
 		return nil, "", nil
@@ -301,25 +319,21 @@ func initAuthDB(config *config.Config) (*sql.DB, string, error) {
 	return db, exPath, nil
 }
 
-func initPostgresAuthDB(config *config.Config) (*sql.DB, error) {
-	if config.PostgresAuthDB == "" {
+func initPostgresAuthDB(cfg *config.Config) (*sql.DB, error) {
+	if cfg.PostgresAuthDB == "" {
 		return nil, nil
 	}
 
-	if err := config.EnsureDBExists(config.PostgresAuthDB); err != nil {
+	if err := cfg.EnsureDBExists(cfg.PostgresAuthDB); err != nil {
 		logger.LogWarn("Auto-setup auth DB failed (will try connecting anyway): %v", err)
 	}
 
-	db, err := sql.Open("postgres", config.PostgresAuthDB)
+	db, err := sql.Open("postgres", cfg.PostgresAuthDB)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao conectar ao banco AUTH PostgreSQL: %v", err)
 	}
 
-	// Configurar pool de conexões para evitar conexões ociosas não fechadas
-	db.SetMaxOpenConns(25)                 // Máximo de 25 conexões abertas simultaneamente
-	db.SetMaxIdleConns(5)                  // Máximo de 5 conexões ociosas no pool
-	db.SetConnMaxLifetime(5 * time.Minute) // Reconectar após 5 minutos para evitar timeouts
-	db.SetConnMaxIdleTime(1 * time.Minute) // Fechar conexões ociosas após 1 minuto
+	config.ConfigurePostgresPool(db)
 
 	err = db.Ping()
 	if err != nil {
@@ -416,6 +430,8 @@ func main() {
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	reclaimerStop := make(chan struct{})
+	go reclaimMemoryPeriodically(reclaimerStop)
 
 	go func() {
 		logger.LogInfo("Iniciando servidor na porta %s", os.Getenv("SERVER_PORT"))
@@ -425,6 +441,7 @@ func main() {
 	}()
 
 	<-quit
+	close(reclaimerStop)
 	logger.LogInfo("[SHUTDOWN] Signal received, shutting down...")
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)

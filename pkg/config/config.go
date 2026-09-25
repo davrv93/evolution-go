@@ -16,6 +16,20 @@ import (
 	config_env "github.com/evolution-foundation/evolution-go/pkg/config/env"
 )
 
+const (
+	postgresMaxOpenConns = 10
+	postgresMaxIdleConns = 2
+)
+
+// ConfigurePostgresPool bounds each pool. Evolution Go opens separate pools
+// for auth and application data, so large defaults multiply per service.
+func ConfigurePostgresPool(db *sql.DB) {
+	db.SetMaxOpenConns(postgresMaxOpenConns)
+	db.SetMaxIdleConns(postgresMaxIdleConns)
+	db.SetConnMaxLifetime(5 * time.Minute)
+	db.SetConnMaxIdleTime(time.Minute)
+}
+
 type Config struct {
 	PostgresAuthDB       string
 	postgresUsersDB      string
@@ -168,11 +182,7 @@ func (c *Config) CreateUsersDB() (*gorm.DB, error) {
 		return nil, fmt.Errorf("erro ao obter sql.DB do GORM: %v", err)
 	}
 
-	// Configurar pool de conexões para evitar conexões ociosas não fechadas
-	sqlDB.SetMaxOpenConns(25)                 // Máximo de 25 conexões abertas simultaneamente
-	sqlDB.SetMaxIdleConns(5)                  // Máximo de 5 conexões ociosas no pool
-	sqlDB.SetConnMaxLifetime(5 * time.Minute) // Reconectar após 5 minutos para evitar timeouts
-	sqlDB.SetConnMaxIdleTime(1 * time.Minute) // Fechar conexões ociosas após 1 minuto
+	ConfigurePostgresPool(sqlDB)
 
 	return db, nil
 }
@@ -193,11 +203,7 @@ func (c *Config) CreateAuthDB() (*sql.DB, error) {
 		return nil, err
 	}
 
-	// Configurar pool de conexões para evitar conexões ociosas não fechadas
-	db.SetMaxOpenConns(25)                 // Máximo de 25 conexões abertas simultaneamente
-	db.SetMaxIdleConns(5)                  // Máximo de 5 conexões ociosas no pool
-	db.SetConnMaxLifetime(5 * time.Minute) // Reconectar após 5 minutos para evitar timeouts
-	db.SetConnMaxIdleTime(1 * time.Minute) // Fechar conexões ociosas após 1 minuto
+	ConfigurePostgresPool(db)
 
 	// Testar a conexão
 	err = db.Ping()
