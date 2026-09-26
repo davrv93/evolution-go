@@ -99,3 +99,6 @@ require (
 	modernc.org/strutil v1.2.0 // indirect
 	modernc.org/token v1.1.0 // indirect
 )
+
+// Parche local: ver third_party/whatsmeow/PATCH-PJG.md
+replace go.mau.fi/whatsmeow => ./third_party/whatsmeow
