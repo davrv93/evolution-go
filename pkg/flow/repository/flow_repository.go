@@ -18,6 +18,9 @@ type FlowRepository interface {
 	GuardarRun(ctx context.Context, run *flow_model.FlowRun) error
 	MarcarRun(ctx context.Context, id, estado string) error
 	RunsPorFlow(ctx context.Context, flowID, estado string, limite int) ([]flow_model.FlowRun, error)
+	// RunsParaResultados trae hasta `limite` runs (máx. 5000) para agregar
+	// resultados de encuesta: solo remitente, estado, contexto y fechas.
+	RunsParaResultados(ctx context.Context, flowID string, limite int) ([]flow_model.FlowRun, error)
 }
 
 type flowRepository struct {
@@ -101,5 +104,17 @@ func (r *flowRepository) RunsPorFlow(ctx context.Context, flowID, estado string,
 		limite = 50
 	}
 	err := q.Order("updated_at DESC").Limit(limite).Find(&runs).Error
+	return runs, err
+}
+
+func (r *flowRepository) RunsParaResultados(ctx context.Context, flowID string, limite int) ([]flow_model.FlowRun, error) {
+	var runs []flow_model.FlowRun
+	if limite <= 0 || limite > 5000 {
+		limite = 5000
+	}
+	err := r.db.WithContext(ctx).
+		Select("id", "flow_id", "remitente", "estado", "contexto", "created_at", "updated_at").
+		Where("flow_id = ?", flowID).
+		Order("updated_at DESC").Limit(limite).Find(&runs).Error
 	return runs, err
 }

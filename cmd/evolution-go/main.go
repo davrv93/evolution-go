@@ -190,8 +190,17 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 	// send_service para no crear ciclos; el setter evita tocar la interfaz
 	// WhatsmeowService. Sin flujos activos, el entrante sigue igual que antes.
 	flowRepository := flow_repository.NewFlowRepository(db)
-	flowService := flow_service.NewFlowService(flowRepository, send_service.NewFlowSender(sendMessageService),
-		flow_service.CallbackHTTP(config.FlowCallbackURL, config.FlowCallbackSecret, config.FlowCallbackTimeout))
+	// Los callbacks llevan también el NOMBRE de la instancia: el pod resuelve
+	// la empresa por él (su ajuste whatsapp.c{id}.instance), no por el uuid.
+	flowCallback := flow_service.ConNombreDeInstancia(
+		flow_service.CallbackHTTP(config.FlowCallbackURL, config.FlowCallbackSecret, config.FlowCallbackTimeout),
+		func(id string) string {
+			if inst, err := instanceRepository.GetInstanceByID(id); err == nil && inst != nil {
+				return inst.Name
+			}
+			return ""
+		})
+	flowService := flow_service.NewFlowService(flowRepository, send_service.NewFlowSender(sendMessageService), flowCallback)
 	if conMotor, ok := whatsmeowService.(interface{ SetFlowService(flow_service.FlowService) }); ok {
 		conMotor.SetFlowService(flowService)
 	}

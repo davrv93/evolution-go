@@ -7,8 +7,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	instance_model "github.com/evolution-foundation/evolution-go/pkg/instance/model"
 	flow_model "github.com/evolution-foundation/evolution-go/pkg/flow/model"
+	instance_model "github.com/evolution-foundation/evolution-go/pkg/instance/model"
 )
 
 func TestEnviarCuentaPorResultado(t *testing.T) {

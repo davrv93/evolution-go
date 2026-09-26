@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	instance_model "github.com/evolution-foundation/evolution-go/pkg/instance/model"
 	flow_model "github.com/evolution-foundation/evolution-go/pkg/flow/model"
+	instance_model "github.com/evolution-foundation/evolution-go/pkg/instance/model"
 )
 
 func callbackFalso(respuestas map[string]map[string]any, falla string) Callback {

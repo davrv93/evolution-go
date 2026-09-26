@@ -1573,6 +1573,7 @@ func (s *sendService) sendPollWithRetry(data *PollStruct, instance *instance_mod
 		}
 
 		s.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] SendPoll successful on attempt %d", instance.Id, attempt)
+		s.registrarEncuesta(instance, message, data)
 		return message, nil
 	}
 

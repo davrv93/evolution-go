@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	instance_model "github.com/evolution-foundation/evolution-go/pkg/instance/model"
 	flow_model "github.com/evolution-foundation/evolution-go/pkg/flow/model"
+	instance_model "github.com/evolution-foundation/evolution-go/pkg/instance/model"
 )
 
 func conPermiso(permitir bool, falla bool) Callback {

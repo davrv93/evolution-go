@@ -4,10 +4,10 @@ import (
 	"net/http"
 	"time"
 
-	instance_model "github.com/evolution-foundation/evolution-go/pkg/instance/model"
 	flow_model "github.com/evolution-foundation/evolution-go/pkg/flow/model"
 	flow_repository "github.com/evolution-foundation/evolution-go/pkg/flow/repository"
 	flow_service "github.com/evolution-foundation/evolution-go/pkg/flow/service"
+	instance_model "github.com/evolution-foundation/evolution-go/pkg/instance/model"
 	"github.com/gin-gonic/gin"
 )
 
@@ -22,6 +22,7 @@ type FlowHandler interface {
 	Probar(ctx *gin.Context)
 	Runs(ctx *gin.Context)
 	Enviar(ctx *gin.Context)
+	Resultados(ctx *gin.Context)
 }
 
 type flowHandler struct {
@@ -48,6 +49,10 @@ type definicionEntrada struct {
 	Entrada     string                  `json:"entrada"`
 	Estado      string                  `json:"estado"`
 	Def         flow_service.Definicion `json:"def"`
+	// Opcionales (flow_handler_menu.go): ausentes = no se tocan, así el
+	// constructor que no los conoce no borra la marca de un menú.
+	Audiencia  *string `json:"audiencia"`
+	PorDefecto *bool   `json:"porDefecto"`
 }
 
 func (h *flowHandler) Listar(ctx *gin.Context) {
@@ -86,6 +91,10 @@ func (h *flowHandler) Crear(ctx *gin.Context) {
 		Estado: flow_model.EstadoBorrador, Entrada: in.Entrada,
 	}
 	def.Steps = pasosJSON(in.Def)
+	if err := aplicarAudiencia(def, in); err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	if err := h.repo.CrearDef(ctx.Request.Context(), def); err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -130,6 +139,10 @@ func (h *flowHandler) Actualizar(ctx *gin.Context) {
 	def.Descripcion = in.Descripcion
 	def.Entrada = in.Entrada
 	def.Steps = pasosJSON(in.Def)
+	if err := aplicarAudiencia(def, in); err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	if err := h.repo.ActualizarDef(c, def); err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -170,6 +183,9 @@ func (h *flowHandler) cambiarEstado(ctx *gin.Context, estado string) {
 			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+	}
+	if estado == flow_model.EstadoActivo && def.PorDefecto {
+		h.pausarOtrosPorDefecto(c, def) // un solo menú activo por audiencia
 	}
 	def.Estado = estado
 	if err := h.repo.ActualizarDef(c, def); err != nil {
@@ -236,7 +252,9 @@ type envioEntrada struct {
 }
 
 // Enviar dispara el flujo a una lista (encuesta saliente). Solo flujos
-// activos, máx. 200 remitentes por llamada. Devuelve el conteo.
+// activos, máx. 200 remitentes por llamada. Contesta en el acto con el
+// conteo (vetados, activos, inválidos, programados) y el detalle por número;
+// los envíos salen en segundo plano con la pausa pedida (Programar).
 func (h *flowHandler) Enviar(ctx *gin.Context) {
 	inst, ok := instanciaDe(ctx)
 	if !ok {
@@ -265,6 +283,36 @@ func (h *flowHandler) Enviar(ctx *gin.Context) {
 	if in.PausaMs > 0 && in.PausaMs <= 10000 {
 		pausa = time.Duration(in.PausaMs) * time.Millisecond
 	}
-	cuenta := h.svc.Enviar(c, inst, def, in.Remitentes, pausa)
-	ctx.JSON(http.StatusOK, gin.H{"message": "success", "data": cuenta})
+	cuenta, detalle := h.svc.Programar(c, inst, def, in.Remitentes, pausa)
+	ctx.JSON(http.StatusOK, gin.H{"message": "success", "data": cuenta, "detalle": detalle,
+		"flujo": gin.H{"id": def.Id, "nombre": def.Nombre}})
+}
+
+// Resultados agrega las respuestas de cada encuesta/botones/lista del flujo:
+// votos por opción y quién votó (flow_service.Resultados). Solo lectura.
+func (h *flowHandler) Resultados(ctx *gin.Context) {
+	inst, ok := instanciaDe(ctx)
+	if !ok {
+		return
+	}
+	c := ctx.Request.Context()
+	rec, err := h.repo.DefPorID(c, ctx.Param("id"), inst.Id)
+	if err != nil {
+		ctx.JSON(http.StatusNotFound, gin.H{"error": "flujo no encontrado"})
+		return
+	}
+	var def flow_service.Definicion
+	if err := defSteps(rec, &def); err != nil {
+		ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": "definición ilegible"})
+		return
+	}
+	runs, err := h.repo.RunsParaResultados(c, rec.Id, 0)
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	ctx.JSON(http.StatusOK, gin.H{"data": gin.H{
+		"flujo": gin.H{"id": rec.Id, "nombre": rec.Nombre, "estado": rec.Estado},
+		"runs":  len(runs), "preguntas": flow_service.Resultados(def, runs),
+	}})
 }

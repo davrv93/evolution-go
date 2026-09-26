@@ -2,7 +2,9 @@ package poll_service
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -21,6 +23,11 @@ type PollService interface {
 
 	// GetPollResults retorna os resultados de uma enquete
 	GetPollResults(ctx context.Context, pollMessageID string, instanceID string) (*model.PollResults, error)
+
+	// RegistrarEncuesta / EncuestaPorID: registro de encuestas enviadas
+	// (poll_registro.go) para traducir los hashes de un voto a texto.
+	RegistrarEncuesta(ctx context.Context, e Encuesta) error
+	EncuestaPorID(ctx context.Context, instanceID, messageID string) (*Encuesta, error)
 }
 
 type pollService struct {
@@ -38,6 +45,9 @@ func NewPollService(db *sql.DB, loggerWrapper *logger_wrapper.LoggerManager) Pol
 	// Auto-migration: criar tabela se não existir
 	if err := service.autoMigrate(); err != nil {
 		loggerWrapper.GetLogger("poll-service").LogError("[POLL] Auto-migration failed: %v", err)
+	}
+	if err := service.migrarRegistro(); err != nil {
+		loggerWrapper.GetLogger("poll-service").LogError("[POLL] poll_messages: %v", err)
 	}
 
 	return service
@@ -234,6 +244,7 @@ func (s *pollService) GetPollResults(ctx context.Context, pollMessageID string, 
 		Voters:        voters,
 	}
 
+	s.completarConRegistro(ctx, results, instanceID)
 	s.loggerWrapper.GetLogger("poll-service").LogInfo("[POLL] Found %d votes for poll %s", len(votes), pollMessageID)
 	return results, nil
 }
@@ -300,5 +311,27 @@ func BuildPollVoteFromEvent(
 		SelectedOptions: selectedOptions,
 		VotedAt:         voteInfo.Timestamp,
 		ReceivedAt:      time.Now(),
+	}
+}
+
+// completarConRegistro traduce los hashes a texto si la encuesta está en
+// poll_messages. Sin registro, el resultado queda como antes (solo hashes).
+func (s *pollService) completarConRegistro(ctx context.Context, r *model.PollResults, instanceID string) {
+	e, err := s.EncuestaPorID(ctx, instanceID, r.PollMessageID)
+	if err != nil || e == nil {
+		return
+	}
+	r.Question = e.Pregunta
+	r.OptionNames = map[string]string{}
+	r.CountsByOption = map[string]int{}
+	for _, o := range e.Opciones {
+		suma := sha256.Sum256([]byte(o))
+		r.OptionNames[hex.EncodeToString(suma[:])] = o
+		r.CountsByOption[o] = 0
+	}
+	for h, n := range r.OptionCounts {
+		if nombre, ok := r.OptionNames[h]; ok {
+			r.CountsByOption[nombre] += n
+		}
 	}
 }

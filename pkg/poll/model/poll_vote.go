@@ -26,6 +26,11 @@ type PollResults struct {
 	Votes         []PollVote     `json:"votes"`
 	OptionCounts  map[string]int `json:"optionCounts"` // hash -> count
 	Voters        []VoterInfo    `json:"voters"`
+	// Con la encuesta en poll_messages (enviada por esta instancia): la
+	// pregunta, el texto de cada hash y el conteo por texto de opción.
+	Question       string            `json:"question,omitempty"`
+	OptionNames    map[string]string `json:"optionNames,omitempty"`    // hash -> texto
+	CountsByOption map[string]int    `json:"countsByOption,omitempty"` // texto -> votos
 }
 
 // VoterInfo representa informações de um votante

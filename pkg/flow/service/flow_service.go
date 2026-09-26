@@ -7,11 +7,12 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
-	instance_model "github.com/evolution-foundation/evolution-go/pkg/instance/model"
 	flow_model "github.com/evolution-foundation/evolution-go/pkg/flow/model"
 	flow_repository "github.com/evolution-foundation/evolution-go/pkg/flow/repository"
+	instance_model "github.com/evolution-foundation/evolution-go/pkg/instance/model"
 )
 
 // TTLRun: sin moverse este tiempo, la conversación se marca abandonada y el
@@ -74,10 +75,12 @@ type Paso struct {
 	Variable     string    `json:"variable"`
 	Validacion   string    `json:"validacion"`
 	Reintentos   int       `json:"reintentos"`
-	MensajeError  string    `json:"mensaje_error"`
+	MensajeError string    `json:"mensaje_error"`
 	Siguiente    string    `json:"siguiente"`
-	Reglas       []Regla   `json:"reglas"`
-	Defecto      string    `json:"defecto"`
+	// Encuesta nativa (flow_encuesta.go): de 2 a 12 opciones con destino.
+	Opciones []Opcion `json:"opciones"`
+	Reglas   []Regla  `json:"reglas"`
+	Defecto  string   `json:"defecto"`
 	// Fase 3: pasos de negocio.
 	PromptSistema  string `json:"prompt_sistema"`
 	Prompt         string `json:"prompt"`
@@ -93,6 +96,9 @@ type Paso struct {
 	Secreto        string `json:"secreto"`
 	TimeoutSegs    int    `json:"timeout_segs"`
 	Mensaje        string `json:"mensaje"`
+	// Menús por flujo (flow_menu.go): consulta al pod y su dato.
+	Accion string `json:"accion"`
+	Dato   string `json:"dato"`
 }
 
 type Definicion struct {
@@ -138,6 +144,11 @@ type FlowService interface {
 	// conteo por resultado. Los vetados y los que ya tienen run no reciben
 	// nada; los inválidos ni se intentan.
 	Enviar(ctx context.Context, inst *instance_model.Instance, d *flow_model.FlowDef, remitentes []string, pausa time.Duration) map[string]int
+	// Programar es Enviar sin esperar: prepara (permiso, duplicados) en el
+	// acto y despacha en segundo plano (flow_envio.go).
+	Programar(ctx context.Context, inst *instance_model.Instance, d *flow_model.FlowDef, remitentes []string, pausa time.Duration) (map[string]int, []DetalleEnvio)
+	// Votar entrega el voto descifrado de una encuesta (flow_encuesta.go).
+	Votar(ctx context.Context, inst *instance_model.Instance, remitente, encuestaID string, hashes [][]byte) (bool, error)
 	SetTTL(d time.Duration)
 	SetLog(log Logger)
 }
@@ -152,6 +163,9 @@ type flowService struct {
 	cb     Callback
 	ttl    time.Duration
 	log    Logger
+	// Números con un envío saliente en curso (flow_envio.go).
+	muEnvio sync.Mutex
+	enEnvio map[string]bool
 }
 
 func NewFlowService(repo flow_repository.FlowRepository, sender Sender, cb Callback) FlowService {
@@ -211,7 +225,7 @@ func (s *flowService) Evaluar(ctx context.Context, inst *instance_model.Instance
 
 	run, err := s.repo.RunActivo(ctx, inst.Id, remitente)
 	if err == nil && run != nil {
-		if time.Since(run.UpdatedAt) > s.ttl {
+		if s.vencido(ctx, inst, run) {
 			_ = s.repo.MarcarRun(ctx, run.Id, flow_model.RunAbandonado)
 			s.bitacora("run %s vencido (%s), se abandona", run.Id, remitente)
 			run = nil
@@ -294,51 +308,17 @@ func numeroLimpio(numero string) string {
 	return d
 }
 
+// Enviar es el envío saliente síncrono (preparar + despachar en el mismo
+// hilo). Lo usan las pruebas; el handler usa Programar.
 func (s *flowService) Enviar(ctx context.Context, inst *instance_model.Instance, d *flow_model.FlowDef, remitentes []string, pausa time.Duration) map[string]int {
-	cuenta := map[string]int{"enviados": 0, "vetados": 0, "activos": 0, "invalidos": 0, "fallos": 0}
 	var def Definicion
 	if err := json.Unmarshal(d.Steps, &def); err != nil {
+		cuenta := nuevaCuenta()
 		cuenta["fallos"] = len(remitentes)
 		return cuenta
 	}
-	vistos := map[string]bool{}
-	for _, crudo := range remitentes {
-		numero := numeroLimpio(crudo)
-		if numero == "" || vistos[numero] {
-			cuenta["invalidos"]++
-			continue
-		}
-		vistos[numero] = true
-		if run, err := s.repo.RunActivo(ctx, inst.Id, numero); err == nil && run != nil {
-			cuenta["activos"]++
-			continue
-		}
-		if s.cb != nil {
-			resp, err := s.cb(ctx, "permiso", map[string]any{"instancia": inst.Id, "remitente": numero})
-			if err != nil || resp == nil {
-				s.bitacora("envío: permiso sin respuesta para %s", numero)
-				cuenta["fallos"]++
-				continue
-			}
-			if ok, _ := resp["ok"].(bool); !ok {
-				cuenta["vetados"]++
-				continue
-			}
-		}
-		if _, err := s.iniciar(ctx, inst, d, &def, numero); err != nil {
-			cuenta["fallos"]++
-			continue
-		}
-		cuenta["enviados"]++
-		if pausa > 0 {
-			select {
-			case <-ctx.Done():
-				return cuenta
-			case <-time.After(pausa):
-			}
-		}
-	}
-	s.bitacora("envío flujo %s: %+v", d.Id, cuenta)
+	aptos, cuenta, _ := s.preparar(ctx, inst, d, &def, remitentes)
+	s.despachar(ctx, inst, d, &def, aptos, pausa, cuenta)
 	return cuenta
 }
 
@@ -382,12 +362,17 @@ func (s *flowService) continuar(ctx context.Context, inst *instance_model.Instan
 		return true, nil
 	}
 	ctxVars := mapaContexto(run.Contexto)
+	// Menús por flujo y consultas al pod (flow_menu.go).
+	if hecho, err := s.continuarMenu(ctx, inst, rec, &def, run, paso, texto, botonID); hecho {
+		return true, err
+	}
 
 	switch paso.Tipo {
 	case TipoBotones, TipoLista:
 		id := botonID
 		if id == "" {
-			id = opcionPorEtiqueta(paso, texto)
+			visto := pasoExpandido(paso, ctxVars)
+			id = opcionPorEtiqueta(&visto, texto)
 		}
 		sig := ""
 		for _, o := range opcionesDe(paso) {
@@ -403,7 +388,7 @@ func (s *flowService) continuar(ctx context.Context, inst *instance_model.Instan
 		}
 		if sig == "" {
 			// No eligió una alternativa válida: se repite el paso tal cual.
-			if err := s.enviarPaso(inst, remitente, paso); err != nil {
+			if err := s.enviarPaso(inst, remitente, paso, ctxVars); err != nil {
 				return true, err
 			}
 			tocarRun(run)
@@ -411,6 +396,8 @@ func (s *flowService) continuar(ctx context.Context, inst *instance_model.Instan
 		}
 		run.StepActual = sig
 		return true, s.ejecutarDesde(ctx, inst, rec, &def, run, "", "")
+	case TipoEncuesta:
+		return s.continuarEncuesta(ctx, inst, rec, &def, run, paso, texto)
 	case TipoEspera:
 		ok, _ := validarRespuesta(pasoValidacion(paso), texto)
 		if !ok {
@@ -423,13 +410,13 @@ func (s *flowService) continuar(ctx context.Context, inst *instance_model.Instan
 			}
 			if n > max {
 				_ = s.repo.MarcarRun(ctx, run.Id, flow_model.RunAbandonado)
-				msg := paso.MensajeError
+				msg := plantilla(paso.MensajeError, ctxVars)
 				if msg == "" {
 					msg = "Lo dejamos aquí. Escríbeme de nuevo cuando quieras retomar."
 				}
 				return true, s.sender.Texto(inst, remitente, msg)
 			}
-			msg := paso.MensajeError
+			msg := plantilla(paso.MensajeError, ctxVars)
 			if msg == "" {
 				msg = "No te entendí. ¿Me lo dices de nuevo?"
 			}
@@ -482,8 +469,14 @@ func (s *flowService) ejecutarDesde(ctx context.Context, inst *instance_model.In
 			}
 			run.StepActual = sig
 			continue
+		case TipoEncuesta:
+			if err := s.enviarEncuesta(inst, run, paso); err != nil {
+				return err
+			}
+			tocarRun(run)
+			return s.repo.GuardarRun(ctx, run)
 		case TipoMensaje, TipoBotones, TipoLista, TipoEspera:
-			if err := s.enviarPaso(inst, run.Remitente, paso); err != nil {
+			if err := s.enviarPaso(inst, run.Remitente, paso, mapaContexto(run.Contexto)); err != nil {
 				return err
 			}
 			if paso.Tipo == TipoMensaje {
@@ -497,6 +490,18 @@ func (s *flowService) ejecutarDesde(ctx context.Context, inst *instance_model.In
 			}
 			tocarRun(run)
 			return s.repo.GuardarRun(ctx, run)
+		case TipoMenu:
+			if err := s.enviarMenu(inst, run.Remitente, paso, mapaContexto(run.Contexto)); err != nil {
+				return err
+			}
+			tocarRun(run)
+			return s.repo.GuardarRun(ctx, run)
+		case TipoConsulta:
+			seguir, err := s.pasoConsulta(ctx, inst, def, run, paso, "", true)
+			if err != nil || !seguir {
+				return err
+			}
+			continue
 		case TipoIA, TipoCorreo, TipoReporte, TipoWebhook, TipoHumano, TipoPedido:
 			if err := s.ejecutarNegocio(ctx, inst, run, paso); err != nil {
 				return err
@@ -514,7 +519,11 @@ func (s *flowService) ejecutarDesde(ctx context.Context, inst *instance_model.In
 	return errors.New("flujo: demasiados pasos encadenados, posible ciclo")
 }
 
-func (s *flowService) enviarPaso(inst *instance_model.Instance, remitente string, paso *Paso) error {
+// enviarPaso manda un paso con sus {{variables}} ya expandidas (ver
+// flow_plantilla.go).
+func (s *flowService) enviarPaso(inst *instance_model.Instance, remitente string, original *Paso, vars map[string]string) error {
+	visto := pasoExpandido(original, vars)
+	paso := &visto
 	texto := paso.Texto
 	if paso.Icono != "" && !strings.HasPrefix(texto, paso.Icono) {
 		texto = paso.Icono + " " + texto
@@ -859,13 +868,21 @@ func (s *flowService) ValidarDefinicion(def Definicion) error {
 			if err := irA(p.Siguiente, donde); err != nil {
 				return err
 			}
+		case TipoEncuesta:
+			if err := validarEncuesta(p, donde, irA); err != nil {
+				return err
+			}
+		case TipoConsulta, TipoMenu:
+			if err := validarPasoMenu(p, donde, irA); err != nil {
+				return err
+			}
 		case TipoHumano, TipoPedido:
 			// Sin campos obligatorios: el mensaje es opcional (hay puente por defecto).
 		default:
 			return fmt.Errorf("flujo: %s con tipo desconocido %q", donde, p.Tipo)
 		}
 	}
-	return nil
+	return validarDefectos(def, porClave)
 }
 
 // VistaPrevia valida y devuelve los pasos en orden de definición, sin enviar
@@ -892,6 +909,10 @@ func (s *flowService) VistaPrevia(def Definicion) ([]map[string]string, error) {
 			resumen = fmt.Sprintf("%s [%d opciones en lista]", p.Texto, n)
 		}
 		switch p.Tipo {
+		case TipoEncuesta:
+			resumen = resumenEncuesta(&p)
+		case TipoConsulta, TipoMenu:
+			resumen = resumenMenu(&p)
 		case TipoIA:
 			resumen = "IA: " + recortar(p.Prompt, 80)
 		case TipoCorreo:

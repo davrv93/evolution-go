@@ -1189,6 +1189,10 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			return
 		}
 
+		// El voto de una encuesta se descifra con la identidad ORIGINAL del
+		// votante (antes del canje LID↔número de abajo): ver encuesta_voto.go.
+		infoAntesDelCanje := evt.Info
+
 		// Trata o caso especial onde Sender é @lid e SenderAlt é @s.whatsapp.net
 		// Neste caso, devemos inverter: Sender e Chat devem ser @s.whatsapp.net, SenderAlt deve ser @lid
 		senderStr := evt.Info.Sender.String()
@@ -1284,10 +1288,32 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 				fmt.Printf("[POLL DEBUG] ✅ mycli.WAClient is initialized: %s\n", mycli.WAClient.Store.ID)
 			}
 
-			decrypted, err := mycli.clientPointer[mycli.userID].DecryptPollVote(context.Background(), evt)
+			decrypted, err := descifrarVoto(context.Background(), mycli.clientPointer[mycli.userID], evt, infoAntesDelCanje)
 			if err != nil {
+				// Sin secreto (encuesta enviada desde otro dispositivo o antes
+				// de vincular) no hay forma de leerlo: queda en el log.
 				mycli.loggerWrapper.GetLogger(mycli.userID).LogError("[%s] Failed to decrypt vote: %v", mycli.userID, err)
 			} else {
+				// data.pollVote: el voto en TEXTO para el webhook, y al motor
+				// de flujos si el remitente tiene un run esperando la encuesta.
+				encuestaID := evt.Message.GetPollUpdateMessage().GetPollCreationMessageKey().GetID()
+				var registrada *poll_service.Encuesta
+				if mycli.pollService != nil {
+					ctxReg, cancelReg := context.WithTimeout(context.Background(), 3*time.Second)
+					registrada, _ = mycli.pollService.EncuestaPorID(ctxReg, mycli.Instance.Id, encuestaID)
+					cancelReg()
+				}
+				dataMap["pollVote"] = votoParaWebhook(encuestaID, decrypted, registrada)
+				if mycli.flowService != nil && !evt.Info.IsFromMe && !strings.Contains(evt.Info.Chat.String(), "@g.us") {
+					motor, inst := mycli.flowService, mycli.Instance
+					remitente := evt.Info.Chat.ToNonAD().User
+					hashes := decrypted.GetSelectedOptions()
+					go func() {
+						if _, err := motor.Votar(context.Background(), inst, remitente, encuestaID, hashes); err != nil {
+							mycli.loggerWrapper.GetLogger(mycli.userID).LogError("[%s] flujo (voto): %v", mycli.userID, err)
+						}
+					}()
+				}
 				mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] Selected options in decrypted vote:", mycli.userID)
 				for _, option := range decrypted.SelectedOptions {
 					mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("- %X", option)
@@ -1730,8 +1756,10 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 	// ===== FLUJOS CONVERSACIONALES (pkg/flow) =====
 		// Si hay un flujo para este remitente o entrada, evolution-go lo ejecuta
 		// (responde directo por sendService) y el webhook informativo sigue su
-		// curso para la bitácora. Nunca bloquea: corre en gorutina y los errores
-		// solo se registran. Sin flujo aplicable, nada cambia.
+		// curso para la bitácora. La DECISIÓN es síncrona y acotada (≤3 s, casi
+		// siempre milisegundos) para marcar el webhook; la EJECUCIÓN va en
+		// gorutina y sus errores solo se registran. Sin flujo aplicable, nada
+		// cambia.
 		if mycli.flowService != nil && !evt.Info.IsFromMe &&
 			!strings.Contains(evt.Info.Chat.String(), "@g.us") &&
 			!strings.Contains(evt.Info.Chat.String(), "@broadcast") {
@@ -1745,8 +1773,27 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 					botonID = id
 				}
 			}
-			if texto != "" || botonID != "" {
-				remitente := evt.Info.Chat.ToNonAD().User
+			remitente := evt.Info.Chat.ToNonAD().User
+			if orq, ok := mycli.flowService.(flow_service.Orquestador); ok {
+				// ORQUESTADOR (pkg/flow/service/flow_orquestador.go): una sola
+				// decisión, síncrona y acotada, ANTES del webhook. Si atiende un
+				// flujo, la marca `pjgFlujo` le dice al pod que guarde el mensaje
+				// sin responder; si no, qué menús clásicos deben callar.
+				cdec, cancelar := context.WithTimeout(context.Background(), 3*time.Second)
+				dec := orq.Decidir(cdec, mycli.Instance, remitente, texto, botonID)
+				cancelar()
+				if marca := dec.Marca(); marca != nil {
+					postMap["pjgFlujo"] = marca
+				}
+				if dec.Atiende {
+					mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] flujo: atiende %s (%s) a %s", mycli.userID, dec.FlowID, dec.Motivo, remitente)
+					go func() {
+						if err := orq.Atender(context.Background(), dec); err != nil {
+							mycli.loggerWrapper.GetLogger(mycli.userID).LogError("[%s] flujo: %v", mycli.userID, err)
+						}
+					}()
+				}
+			} else if texto != "" || botonID != "" {
 				inst := mycli.Instance
 				motor := mycli.flowService
 				go func() {

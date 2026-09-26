@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	instance_model "github.com/evolution-foundation/evolution-go/pkg/instance/model"
 	flow_model "github.com/evolution-foundation/evolution-go/pkg/flow/model"
 	flow_repository "github.com/evolution-foundation/evolution-go/pkg/flow/repository"
+	instance_model "github.com/evolution-foundation/evolution-go/pkg/instance/model"
 )
 
 type repoFalso struct {
@@ -83,6 +83,16 @@ func (r *repoFalso) MarcarRun(_ context.Context, id, estado string) error {
 
 func (r *repoFalso) RunsPorFlow(_ context.Context, flowID, _ string, _ int) ([]flow_model.FlowRun, error) {
 	return nil, nil
+}
+
+func (r *repoFalso) RunsParaResultados(_ context.Context, flowID string, _ int) ([]flow_model.FlowRun, error) {
+	out := []flow_model.FlowRun{}
+	for _, run := range r.runs {
+		if run.FlowID == flowID {
+			out = append(out, *run)
+		}
+	}
+	return out, nil
 }
 
 var _ flow_repository.FlowRepository = (*repoFalso)(nil)

@@ -156,112 +156,117 @@ func (s *flowService) ejecutarNegocio(ctx context.Context, inst *instance_model.
 	}
 
 	switch paso.Tipo {
-	case TipoIA: {
-		texto := "Ahora mismo no puedo consultar a la IA, sigamos."
-		if s.cb != nil {
-			payload := map[string]any{
-				"sistema":     plantilla(paso.PromptSistema, vars),
-				"prompt":      plantilla(paso.Prompt, vars),
-				"max_tokens":  paso.MaxTokens,
-				"flow_id":     run.FlowID,
-				"run_id":      run.Id,
-				"instancia":   run.InstanceID,
-				"remitente":   run.Remitente,
-				"paso":        paso.Clave,
-				"contexto":    vars,
-			}
-			if resp, err := s.cb(ctx, "ia", payload); err == nil {
-				if t := textoDe(resp); t != "" {
-					texto = t
+	case TipoIA:
+		{
+			texto := "Ahora mismo no puedo consultar a la IA, sigamos."
+			if s.cb != nil {
+				payload := map[string]any{
+					"sistema":    plantilla(paso.PromptSistema, vars),
+					"prompt":     plantilla(paso.Prompt, vars),
+					"max_tokens": paso.MaxTokens,
+					"flow_id":    run.FlowID,
+					"run_id":     run.Id,
+					"instancia":  run.InstanceID,
+					"remitente":  run.Remitente,
+					"paso":       paso.Clave,
+					"contexto":   vars,
 				}
-				ctxVars = fusionarContexto(vars, resp)
-			}
-		}
-		if paso.VariableSalida != "" {
-			ctxVars[paso.VariableSalida] = texto
-		}
-		if err := s.sender.Texto(inst, run.Remitente, texto); err != nil {
-			return err
-		}
-		return avanzar(paso.Siguiente)
-	}
-	case TipoCorreo: {
-		var primero error
-		if s.cb != nil {
-			_, primero = s.cb(ctx, "correo", map[string]any{
-				"para":      plantilla(paso.Para, vars),
-				"asunto":    plantilla(paso.Asunto, vars),
-				"cuerpo":    plantilla(paso.Cuerpo, vars),
-				"flow_id":   run.FlowID,
-				"run_id":    run.Id,
-				"instancia": run.InstanceID,
-			})
-		}
-		// Se avanza igual falle o no: reintentar un correo es duplicarlo.
-		// El error queda en el log vía Evaluar.
-		if err := avanzar(paso.Siguiente); err != nil {
-			return err
-		}
-		return primero
-	}
-	case TipoReporte: {
-		texto := "No pude armar el reporte ahora mismo."
-		if s.cb != nil {
-			if resp, err := s.cb(ctx, "reporte", map[string]any{
-				"reporte_id": paso.ReporteID,
-				"formato":    formatoReporte(paso),
-				"flow_id":    run.FlowID,
-				"run_id":     run.Id,
-				"instancia":  run.InstanceID,
-				"remitente":  run.Remitente,
-				"contexto":   vars,
-			}); err == nil {
-				if t := textoDe(resp); t != "" {
-					texto = t
+				if resp, err := s.cb(ctx, "ia", payload); err == nil {
+					if t := textoDe(resp); t != "" {
+						texto = t
+					}
+					ctxVars = fusionarContexto(vars, resp)
 				}
-				ctxVars = fusionarContexto(vars, resp)
 			}
-		}
-		if err := s.sender.Texto(inst, run.Remitente, texto); err != nil {
-			return err
-		}
-		return avanzar(paso.Siguiente)
-	}
-	case TipoWebhook: {
-		texto, extra := s.llamarWebhook(ctx, run, paso, vars)
-		ctxVars = fusionarContexto(vars, extra)
-		if texto != "" {
+			if paso.VariableSalida != "" {
+				ctxVars[paso.VariableSalida] = texto
+			}
 			if err := s.sender.Texto(inst, run.Remitente, texto); err != nil {
 				return err
 			}
+			return avanzar(paso.Siguiente)
 		}
-		return avanzar(paso.Siguiente)
-	}
-	case TipoHumano, TipoPedido: {
-		puente := "Te comunico con una persona del equipo. Enseguida te escribe."
-		if paso.Tipo == TipoPedido {
-			puente = "Perfecto, te paso con ventas para tomar tu pedido."
+	case TipoCorreo:
+		{
+			var primero error
+			if s.cb != nil {
+				_, primero = s.cb(ctx, "correo", map[string]any{
+					"para":      plantilla(paso.Para, vars),
+					"asunto":    plantilla(paso.Asunto, vars),
+					"cuerpo":    plantilla(paso.Cuerpo, vars),
+					"flow_id":   run.FlowID,
+					"run_id":    run.Id,
+					"instancia": run.InstanceID,
+				})
+			}
+			// Se avanza igual falle o no: reintentar un correo es duplicarlo.
+			// El error queda en el log vía Evaluar.
+			if err := avanzar(paso.Siguiente); err != nil {
+				return err
+			}
+			return primero
 		}
-		if paso.Mensaje != "" {
-			puente = plantilla(paso.Mensaje, vars)
+	case TipoReporte:
+		{
+			texto := "No pude armar el reporte ahora mismo."
+			if s.cb != nil {
+				if resp, err := s.cb(ctx, "reporte", map[string]any{
+					"reporte_id": paso.ReporteID,
+					"formato":    formatoReporte(paso),
+					"flow_id":    run.FlowID,
+					"run_id":     run.Id,
+					"instancia":  run.InstanceID,
+					"remitente":  run.Remitente,
+					"contexto":   vars,
+				}); err == nil {
+					if t := textoDe(resp); t != "" {
+						texto = t
+					}
+					ctxVars = fusionarContexto(vars, resp)
+				}
+			}
+			if err := s.sender.Texto(inst, run.Remitente, texto); err != nil {
+				return err
+			}
+			return avanzar(paso.Siguiente)
 		}
-		if s.cb != nil {
-			// Best-effort: si el pod no marca la conversación, igual se deriva.
-			_, _ = s.cb(ctx, paso.Tipo, map[string]any{
-				"remitente": run.Remitente,
-				"flow_id":   run.FlowID,
-				"run_id":    run.Id,
-				"instancia": run.InstanceID,
-				"contexto":  vars,
-			})
+	case TipoWebhook:
+		{
+			texto, extra := s.llamarWebhook(ctx, run, paso, vars)
+			ctxVars = fusionarContexto(vars, extra)
+			if texto != "" {
+				if err := s.sender.Texto(inst, run.Remitente, texto); err != nil {
+					return err
+				}
+			}
+			return avanzar(paso.Siguiente)
 		}
-		if err := s.sender.Texto(inst, run.Remitente, puente); err != nil {
-			return err
+	case TipoHumano, TipoPedido:
+		{
+			puente := "Te comunico con una persona del equipo. Enseguida te escribe."
+			if paso.Tipo == TipoPedido {
+				puente = "Perfecto, te paso con ventas para tomar tu pedido."
+			}
+			if paso.Mensaje != "" {
+				puente = plantilla(paso.Mensaje, vars)
+			}
+			if s.cb != nil {
+				// Best-effort: si el pod no marca la conversación, igual se deriva.
+				_, _ = s.cb(ctx, paso.Tipo, map[string]any{
+					"remitente": run.Remitente,
+					"flow_id":   run.FlowID,
+					"run_id":    run.Id,
+					"instancia": run.InstanceID,
+					"contexto":  vars,
+				})
+			}
+			if err := s.sender.Texto(inst, run.Remitente, puente); err != nil {
+				return err
+			}
+			// Derivado = el motor suelta la conversación: los siguientes mensajes
+			// ya no los consume ningún run y los ve el pod (persona o ventas).
+			return cerrarComo(flow_model.RunDerivado)
 		}
-		// Derivado = el motor suelta la conversación: los siguientes mensajes
-		// ya no los consume ningún run y los ve el pod (persona o ventas).
-		return cerrarComo(flow_model.RunDerivado)
-	}
 	default:
 		return fmt.Errorf("flujo: paso de negocio desconocido %q", paso.Tipo)
 	}
