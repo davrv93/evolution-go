@@ -57,6 +57,13 @@ const (
 	// Baileys). Ver README, "Botones y listas interactivas".
 	INTERACTIVE_STYLE = "INTERACTIVE_STYLE"
 
+	// Flujos conversacionales (pkg/flow): pasos de negocio (ia, correo,
+	// reporte, humano, pedido) se resuelven por callback HTTP al pod.
+	// Sin URL, esos pasos se degradan a texto y la conversación sigue.
+	FLOW_CALLBACK_URL             = "FLOW_CALLBACK_URL"
+	FLOW_CALLBACK_SECRET          = "FLOW_CALLBACK_SECRET"
+	FLOW_CALLBACK_TIMEOUT_SECONDS = "FLOW_CALLBACK_TIMEOUT_SECONDS"
+
 	// Logger configurations
 	LOG_MAX_SIZE    = "LOG_MAX_SIZE"
 	LOG_MAX_BACKUPS = "LOG_MAX_BACKUPS"

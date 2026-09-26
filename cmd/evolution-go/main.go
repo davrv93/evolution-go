@@ -28,6 +28,10 @@ import (
 	community_handler "github.com/evolution-foundation/evolution-go/pkg/community/handler"
 	community_service "github.com/evolution-foundation/evolution-go/pkg/community/service"
 	config "github.com/evolution-foundation/evolution-go/pkg/config"
+	flow_handler "github.com/evolution-foundation/evolution-go/pkg/flow/handler"
+	flow_model "github.com/evolution-foundation/evolution-go/pkg/flow/model"
+	flow_repository "github.com/evolution-foundation/evolution-go/pkg/flow/repository"
+	flow_service "github.com/evolution-foundation/evolution-go/pkg/flow/service"
 	"github.com/evolution-foundation/evolution-go/pkg/core"
 	webhook_producer "github.com/evolution-foundation/evolution-go/pkg/events/webhook"
 	websocket_producer "github.com/evolution-foundation/evolution-go/pkg/events/websocket"
@@ -182,6 +186,26 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 	// NOVO: PollHandler usando PollService já inicializado no whatsmeowService (evita dupla inicialização)
 	pollHandler := poll_handler.NewPollHandler(whatsmeowService.GetPollService(), loggerWrapper)
 
+	// NOVO: motor de flujos conversacionales (pkg/flow). El adaptador vive en
+	// send_service para no crear ciclos; el setter evita tocar la interfaz
+	// WhatsmeowService. Sin flujos activos, el entrante sigue igual que antes.
+	flowRepository := flow_repository.NewFlowRepository(db)
+	flowService := flow_service.NewFlowService(flowRepository, send_service.NewFlowSender(sendMessageService),
+		flow_service.CallbackHTTP(config.FlowCallbackURL, config.FlowCallbackSecret, config.FlowCallbackTimeout))
+	if conMotor, ok := whatsmeowService.(interface{ SetFlowService(flow_service.FlowService) }); ok {
+		conMotor.SetFlowService(flowService)
+	}
+	// Bitácora del motor: disparo, pasos, cierres y vetos salen por el log
+	// con el nombre «flow», junto al resto de eventos de la instancia.
+	if conBitacora, ok := interface{}(flowService).(interface {
+		SetLog(flow_service.Logger)
+	}); ok {
+		conBitacora.SetLog(func(formato string, args ...any) {
+			loggerWrapper.GetLogger("flow").LogInfo("[flow] "+formato, args...)
+		})
+	}
+	flowHandler := flow_handler.NewFlowHandler(flowService, flowRepository)
+
 	r := gin.Default()
 
 	// CORS middleware — must be before everything else
@@ -225,6 +249,7 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 		newsletter_handler.NewNewsletterHandler(newsletterService),
 		pollHandler,
 		server_handler.NewServerHandler(),
+		flowHandler,
 	).AssignRoutes(r)
 
 	if config.ConnectOnStartup {
@@ -248,7 +273,8 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 }
 
 func migrate(db *gorm.DB) {
-	err := db.AutoMigrate(&instance_model.Instance{}, &message_model.Message{}, &label_model.Label{})
+	err := db.AutoMigrate(&instance_model.Instance{}, &message_model.Message{}, &label_model.Label{},
+		&flow_model.FlowDef{}, &flow_model.FlowRun{})
 
 	if err != nil {
 		log.Fatal(err)

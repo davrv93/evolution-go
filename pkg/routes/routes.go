@@ -8,6 +8,7 @@ import (
 	call_handler "github.com/evolution-foundation/evolution-go/pkg/call/handler"
 	chat_handler "github.com/evolution-foundation/evolution-go/pkg/chat/handler"
 	community_handler "github.com/evolution-foundation/evolution-go/pkg/community/handler"
+	flow_handler "github.com/evolution-foundation/evolution-go/pkg/flow/handler"
 	group_handler "github.com/evolution-foundation/evolution-go/pkg/group/handler"
 	instance_handler "github.com/evolution-foundation/evolution-go/pkg/instance/handler"
 	label_handler "github.com/evolution-foundation/evolution-go/pkg/label/handler"
@@ -35,6 +36,7 @@ type Routes struct {
 	newsletterHandler       newsletter_handler.NewsletterHandler
 	pollHandler             *poll_handler.PollHandler
 	serverHandler           server_handler.ServerHandler
+	flowHandler             flow_handler.FlowHandler
 }
 
 func (r *Routes) AssignRoutes(eng *gin.Engine) {
@@ -244,6 +246,24 @@ func (r *Routes) AssignRoutes(eng *gin.Engine) {
 		}
 	}
 
+	// NOVO: Flujos conversacionales (los lee y ejecuta evolution-go)
+	routes = eng.Group("/flow")
+	{
+		routes.Use(r.authMiddleware.Auth)
+		{
+			routes.GET("", r.flowHandler.Listar)
+			routes.POST("", r.flowHandler.Crear)
+			routes.GET("/:id", r.flowHandler.Ver)
+			routes.PUT("/:id", r.flowHandler.Actualizar)
+			routes.DELETE("/:id", r.flowHandler.Eliminar)
+			routes.POST("/:id/activar", r.flowHandler.Activar)
+			routes.POST("/:id/pausar", r.flowHandler.Pausar)
+			routes.POST("/probar", r.flowHandler.Probar)
+			routes.POST("/:id/probar", r.flowHandler.Probar)
+			routes.GET("/:id/runs", r.flowHandler.Runs)
+		}
+	}
+
 }
 
 func NewRouter(
@@ -260,6 +280,7 @@ func NewRouter(
 	newsletterHandler newsletter_handler.NewsletterHandler,
 	pollHandler *poll_handler.PollHandler,
 	serverHandler server_handler.ServerHandler,
+	flowHandler flow_handler.FlowHandler,
 ) *Routes {
 	return &Routes{
 		authMiddleware:          authMiddleware,
@@ -276,5 +297,6 @@ func NewRouter(
 		newsletterHandler:       newsletterHandler,
 		pollHandler:             pollHandler,
 		serverHandler:           serverHandler,
+		flowHandler:             flowHandler,
 	}
 }

@@ -131,6 +131,11 @@ type Config struct {
 	// InteractiveStyle: InteractiveStyleLegacy o InteractiveStyleViewOnce.
 	// Decide el árbol proto de /send/button (reply) y /send/list.
 	InteractiveStyle string
+	// FlowCallback*: a dónde pide el motor de flujos los pasos de negocio.
+	// Vacío = sin callbacks (esos pasos se degradan, nunca rompen).
+	FlowCallbackURL     string
+	FlowCallbackSecret  string
+	FlowCallbackTimeout time.Duration
 
 	// Logger configurations
 	LogMaxSize    int
@@ -360,6 +365,17 @@ func Load() *Config {
 		logger.LogWarn("[CONFIG] %s=%q inválido (legacy|viewonce), se usa %s", config_env.INTERACTIVE_STYLE, os.Getenv(config_env.INTERACTIVE_STYLE), interactiveStyle)
 	}
 
+	// Callbacks de los pasos de negocio de los flujos (8 s de fábrica: es una
+	// conversación, no un webhook administrativo; se acota entre 2 y 30 s).
+	flowCallbackTimeout := 8 * time.Second
+	if raw := os.Getenv(config_env.FLOW_CALLBACK_TIMEOUT_SECONDS); raw != "" {
+		if secs, err := strconv.Atoi(raw); err == nil && secs >= 2 && secs <= 30 {
+			flowCallbackTimeout = time.Duration(secs) * time.Second
+		} else {
+			logger.LogWarn("[CONFIG] %s=%q inválido, se usa %s", config_env.FLOW_CALLBACK_TIMEOUT_SECONDS, raw, flowCallbackTimeout)
+		}
+	}
+
 	// Convertendo para int com valores padrão caso estejam vazios
 	major := 0
 	if whatsappVersionMajor != "" {
@@ -458,6 +474,9 @@ func Load() *Config {
 		HistorySyncDownload:  historySyncDownload,
 		WebhookTimeout:       webhookTimeout,
 		InteractiveStyle:     interactiveStyle,
+		FlowCallbackURL:      strings.TrimSpace(os.Getenv(config_env.FLOW_CALLBACK_URL)),
+		FlowCallbackSecret:   strings.TrimSpace(os.Getenv(config_env.FLOW_CALLBACK_SECRET)),
+		FlowCallbackTimeout:  flowCallbackTimeout,
 		AmqpGlobalEvents:     amqpGlobalEvents,
 		AmqpSpecificEvents:   amqpSpecificEvents,
 		NatsUrl:              natsUrl,

@@ -36,6 +36,7 @@ import (
 
 	"github.com/evolution-foundation/evolution-go/pkg/config"
 	producer_interfaces "github.com/evolution-foundation/evolution-go/pkg/events/interfaces"
+	flow_service "github.com/evolution-foundation/evolution-go/pkg/flow/service"
 	instance_model "github.com/evolution-foundation/evolution-go/pkg/instance/model"
 	instance_repository "github.com/evolution-foundation/evolution-go/pkg/instance/repository"
 	"github.com/evolution-foundation/evolution-go/pkg/internal/event_types"
@@ -84,6 +85,7 @@ type whatsmeowService struct {
 	messageRepository  message_repository.MessageRepository
 	labelRepository    label_repository.LabelRepository
 	pollService        poll_service.PollService // NOVO: Serviço de enquetes
+	flowService        flow_service.FlowService // NOVO: motor de flujos conversacionales
 	config             *config.Config
 	killChannel        map[string](chan bool)
 	userInfoCache      *cache.Cache
@@ -117,6 +119,7 @@ type MyClient struct {
 	messageRepository  message_repository.MessageRepository
 	labelRepository    label_repository.LabelRepository
 	pollService        poll_service.PollService // NOVO: Serviço de enquetes
+	flowService        flow_service.FlowService // NOVO: motor de flujos conversacionales
 	clientPointer      map[string]*whatsmeow.Client
 	myClientPointer    map[string]*MyClient
 	lidStore           store.LIDStore
@@ -479,6 +482,7 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 		messageRepository:  w.messageRepository,
 		labelRepository:    w.labelRepository,
 		pollService:        w.pollService, // NOVO: Serviço de enquetes
+		flowService:        w.flowService, // NOVO: motor de flujos conversacionales
 		userInfoCache:      w.userInfoCache,
 		clientPointer:      w.clientPointer,
 		myClientPointer:    w.myClientPointer,
@@ -1723,6 +1727,36 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			}
 		}
 
+	// ===== FLUJOS CONVERSACIONALES (pkg/flow) =====
+		// Si hay un flujo para este remitente o entrada, evolution-go lo ejecuta
+		// (responde directo por sendService) y el webhook informativo sigue su
+		// curso para la bitácora. Nunca bloquea: corre en gorutina y los errores
+		// solo se registran. Sin flujo aplicable, nada cambia.
+		if mycli.flowService != nil && !evt.Info.IsFromMe &&
+			!strings.Contains(evt.Info.Chat.String(), "@g.us") &&
+			!strings.Contains(evt.Info.Chat.String(), "@broadcast") {
+			texto := evt.Message.GetConversation()
+			if texto == "" {
+				texto = evt.Message.GetExtendedTextMessage().GetText()
+			}
+			botonID := ""
+			if buttonClickData != nil {
+				if id, ok := buttonClickData["buttonId"].(string); ok {
+					botonID = id
+				}
+			}
+			if texto != "" || botonID != "" {
+				remitente := evt.Info.Chat.ToNonAD().User
+				inst := mycli.Instance
+				motor := mycli.flowService
+				go func() {
+					if _, err := motor.Evaluar(context.Background(), inst, remitente, texto, botonID); err != nil {
+						mycli.loggerWrapper.GetLogger(mycli.userID).LogError("[%s] flujo: %v", mycli.userID, err)
+					}
+				}()
+			}
+		}
+
 		mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] ===== MESSAGE PROCESSING COMPLETED ===== ID: %s, From: %s, Type: %s, Webhook: %v", mycli.userID, evt.Info.ID, evt.Info.Chat.String(), evt.Info.Type, doWebhook)
 	case *events.Receipt:
 		doWebhook = true
@@ -2779,6 +2813,14 @@ func (w whatsmeowService) ClearInstanceCache(instanceId string, token string) er
 
 	w.loggerWrapper.GetLogger(instanceId).LogInfo("[%s] Instance cache completely cleared", instanceId)
 	return nil
+}
+
+// SetFlowService conecta el motor de flujos conversacionales (pkg/flow).
+// Se llama desde main después de crear sendMessageService, cuyo adaptador
+// (FlowSender) es lo que el motor usa para responder. Sin motor, el
+// entrante sigue su curso normal: el flujo es opcional.
+func (w *whatsmeowService) SetFlowService(f flow_service.FlowService) {
+	w.flowService = f
 }
 
 func NewWhatsmeowService(
