@@ -21,6 +21,32 @@ const (
 	postgresMaxIdleConns = 2
 )
 
+// Valores admitidos de INTERACTIVE_STYLE: cómo se arma el proto de los
+// botones de respuesta (/send/button) y de las listas (/send/list).
+const (
+	// InteractiveStyleLegacy: ButtonsMessage / ListMessage envueltos en
+	// DocumentWithCaptionMessage. Es lo que el fork mandaba hasta ahora.
+	InteractiveStyleLegacy = "legacy"
+	// InteractiveStyleViewOnce: ViewOnceMessage → InteractiveMessage →
+	// NativeFlowMessage (quick_reply / single_select), el árbol que generan
+	// Baileys y Evolution API v2 y que los clientes actuales sí pintan.
+	InteractiveStyleViewOnce = "viewonce"
+)
+
+// ParseInteractiveStyle normaliza el valor crudo de INTERACTIVE_STYLE.
+// Devuelve el estilo efectivo y si el valor era válido; vacío o inválido
+// caen en "legacy" para no cambiar el comportamiento sin pedirlo.
+func ParseInteractiveStyle(raw string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", InteractiveStyleLegacy:
+		return InteractiveStyleLegacy, true
+	case InteractiveStyleViewOnce:
+		return InteractiveStyleViewOnce, true
+	default:
+		return InteractiveStyleLegacy, false
+	}
+}
+
 // ConfigurePostgresPool bounds each pool. Evolution Go opens separate pools
 // for auth and application data, so large defaults multiply per service.
 func ConfigurePostgresPool(db *sql.DB) {
@@ -83,6 +109,9 @@ type Config struct {
 	// WebhookTimeout acota cada POST saliente; sin tope, un receptor colgado
 	// retiene goroutine, socket y payload indefinidamente (x5 reintentos).
 	WebhookTimeout time.Duration
+	// InteractiveStyle: InteractiveStyleLegacy o InteractiveStyleViewOnce.
+	// Decide el árbol proto de /send/button (reply) y /send/list.
+	InteractiveStyle string
 
 	// Logger configurations
 	LogMaxSize    int
@@ -307,6 +336,11 @@ func Load() *Config {
 		}
 	}
 
+	interactiveStyle, styleOK := ParseInteractiveStyle(os.Getenv(config_env.INTERACTIVE_STYLE))
+	if !styleOK {
+		logger.LogWarn("[CONFIG] %s=%q inválido (legacy|viewonce), se usa %s", config_env.INTERACTIVE_STYLE, os.Getenv(config_env.INTERACTIVE_STYLE), interactiveStyle)
+	}
+
 	// Convertendo para int com valores padrão caso estejam vazios
 	major := 0
 	if whatsappVersionMajor != "" {
@@ -404,6 +438,7 @@ func Load() *Config {
 		CheckUserExists:      checkUserExists != "false", // Default true, set to false to disable
 		HistorySyncDownload:  historySyncDownload,
 		WebhookTimeout:       webhookTimeout,
+		InteractiveStyle:     interactiveStyle,
 		AmqpGlobalEvents:     amqpGlobalEvents,
 		AmqpSpecificEvents:   amqpSpecificEvents,
 		NatsUrl:              natsUrl,

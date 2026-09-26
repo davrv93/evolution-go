@@ -3,7 +3,6 @@ package send_service
 import (
 	"bytes"
 	"context"
-	crypto_rand "crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -255,7 +254,10 @@ type Section struct {
 
 // ListStruct is the body for POST /send/list.
 //
-// Renders as a single-select menu (legacy ListMessage format — compatible with iOS, Android and WhatsApp Web).
+// Renders as a single-select menu. The wire format depends on INTERACTIVE_STYLE:
+// `legacy` (default) sends a ListMessage inside DocumentWithCaptionMessage;
+// `viewonce` sends ViewOnceMessage → InteractiveMessage → NativeFlow `single_select`
+// (what Baileys / Evolution API v2 emit and current Android/iOS clients render).
 type ListStruct struct {
 	// Destination phone number.
 	Number string `json:"number" example:"5582988898565"`
@@ -1849,88 +1851,17 @@ func (s *sendService) SendButton(data *ButtonStruct, instance *instance_model.In
 	messageParamsJSON := `{"from":"api","templateId":` + templateId + `}`
 
 	// MessageSecret (32 random bytes) — required for iOS to render interactive messages.
-	btnMsgSecret := make([]byte, 32)
-	_, _ = crypto_rand.Read(btnMsgSecret)
+	btnMsgSecret := newMessageSecret()
 
 	var msg *waE2E.Message
 	var msgType string
 
 	if hasReply && !hasOtherTypes && !hasPix {
-		// Reply-only: native ButtonsMessage wrapped in DocumentWithCaptionMessage (Baileys PR #36).
-		var replyButtons []*waE2E.ButtonsMessage_Button
-		for _, v := range data.Buttons {
-			replyButtons = append(replyButtons, &waE2E.ButtonsMessage_Button{
-				ButtonID: proto.String(v.Id),
-				ButtonText: &waE2E.ButtonsMessage_Button_ButtonText{
-					DisplayText: proto.String(v.DisplayText),
-				},
-				Type: waE2E.ButtonsMessage_Button_RESPONSE.Enum(),
-			})
-		}
-
-		buttonsMsg := &waE2E.ButtonsMessage{
-			ContentText: proto.String(data.Description),
-			FooterText:  proto.String(data.Footer),
-			HeaderType:  waE2E.ButtonsMessage_EMPTY.Enum(),
-			Buttons:     replyButtons,
-		}
-
-		// Optional media header (image or video URL).
-		if data.ImageUrl != "" {
-			if resp, err := http.Get(data.ImageUrl); err == nil {
-				fileData, readErr := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				if readErr == nil {
-					if uploaded, upErr := client.Upload(context.Background(), fileData, whatsmeow.MediaImage); upErr == nil {
-						buttonsMsg.HeaderType = waE2E.ButtonsMessage_IMAGE.Enum()
-						buttonsMsg.Header = &waE2E.ButtonsMessage_ImageMessage{
-							ImageMessage: &waE2E.ImageMessage{
-								URL:           proto.String(uploaded.URL),
-								DirectPath:    proto.String(uploaded.DirectPath),
-								MediaKey:      uploaded.MediaKey,
-								Mimetype:      proto.String("image/jpeg"),
-								FileEncSHA256: uploaded.FileEncSHA256,
-								FileSHA256:    uploaded.FileSHA256,
-								FileLength:    proto.Uint64(uint64(len(fileData))),
-							},
-						}
-					}
-				}
-			}
-		} else if data.VideoUrl != "" {
-			if resp, err := http.Get(data.VideoUrl); err == nil {
-				fileData, readErr := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				if readErr == nil {
-					if uploaded, upErr := client.Upload(context.Background(), fileData, whatsmeow.MediaVideo); upErr == nil {
-						buttonsMsg.HeaderType = waE2E.ButtonsMessage_VIDEO.Enum()
-						buttonsMsg.Header = &waE2E.ButtonsMessage_VideoMessage{
-							VideoMessage: &waE2E.VideoMessage{
-								URL:           proto.String(uploaded.URL),
-								DirectPath:    proto.String(uploaded.DirectPath),
-								MediaKey:      uploaded.MediaKey,
-								Mimetype:      proto.String("video/mp4"),
-								FileEncSHA256: uploaded.FileEncSHA256,
-								FileSHA256:    uploaded.FileSHA256,
-								FileLength:    proto.Uint64(uint64(len(fileData))),
-							},
-						}
-					}
-				}
-			}
-		}
-
-		msg = &waE2E.Message{
-			DocumentWithCaptionMessage: &waE2E.FutureProofMessage{
-				Message: &waE2E.Message{
-					ButtonsMessage: buttonsMsg,
-				},
-			},
-			MessageContextInfo: &waE2E.MessageContextInfo{
-				MessageSecret: btnMsgSecret,
-			},
-		}
-		msgType = "ButtonsMessage"
+		// Reply-only: el árbol lo decide INTERACTIVE_STYLE (legacy = ButtonsMessage
+		// en DocumentWithCaptionMessage; viewonce = ViewOnce → InteractiveMessage →
+		// quick_reply). Ver interactive_builders.go. La cabecera multimedia
+		// opcional se sube antes para que la construcción sea pura.
+		msg, msgType = buildReplyButtonsMessage(s.interactiveStyle(), data, btnMsgSecret, uploadHeaderMedia(client, data))
 	} else if hasPix {
 		// Pix: NativeFlowMessage wrapped in DocumentWithCaptionMessage.
 		paymentMsgParams := `{"native_flow_name":"order_details","version":1}`
@@ -1999,23 +1930,13 @@ func (s *sendService) SendButton(data *ButtonStruct, instance *instance_model.In
 	}
 
 	// Build biz/bot nodes injected directly in the XMPP stanza — required for mobile rendering.
-	// Reply-only buttons get <biz><buttons/></biz>; CTA/Pix get <biz><interactive type="native_flow" v="1"><native_flow name="X"/></interactive></biz>.
+	// Reply-only buttons get <biz><interactive type="native_flow" v="1"><native_flow name="quick_reply"/></interactive></biz>
+	// (same in both INTERACTIVE_STYLE values); CTA/Pix get name="mixed"/"payment_info".
 	// The <bot biz_bot="1"/> node is required for 1:1 chats (skipped on groups).
+	var bizNodes []waBinary.Node
 	var bizInteractiveContent waBinary.Node
 	if hasReply && !hasOtherTypes && !hasPix {
-		bizInteractiveContent = waBinary.Node{
-			Tag: "interactive",
-			Attrs: waBinary.Attrs{
-				"type": "native_flow",
-				"v":    "1",
-			},
-			Content: []waBinary.Node{{
-				Tag: "native_flow",
-				Attrs: waBinary.Attrs{
-					"name": "quick_reply",
-				},
-			}},
-		}
+		bizNodes = replyButtonsBizNodes(data.Number)
 	} else if hasPix {
 		bizInteractiveContent = waBinary.Node{
 			Tag: "interactive",
@@ -2047,17 +1968,13 @@ func (s *sendService) SendButton(data *ButtonStruct, instance *instance_model.In
 		}
 	}
 
-	bizNodes := []waBinary.Node{
-		{
-			Tag:     "biz",
-			Content: []waBinary.Node{bizInteractiveContent},
-		},
-	}
-	if !strings.Contains(data.Number, "@g.us") {
-		bizNodes = append(bizNodes, waBinary.Node{
-			Tag:   "bot",
-			Attrs: waBinary.Attrs{"biz_bot": "1"},
-		})
+	if bizNodes == nil {
+		bizNodes = appendBotNode([]waBinary.Node{
+			{
+				Tag:     "biz",
+				Content: []waBinary.Node{bizInteractiveContent},
+			},
+		}, data.Number)
 	}
 
 	// Route through centralized SendMessage for ContextInfo, webhooks, quotes, mentions.
@@ -2245,97 +2162,22 @@ func sectionsToString(data *ListStruct) (string, error) {
 }
 
 func (s *sendService) SendList(data *ListStruct, instance *instance_model.Instance) (*MessageSendStruct, error) {
-	// Legacy ListMessage format - works on iOS, Android and Web
-	// Matching PAPI Node.js default (non-modern) path exactly
-
-	buttonText := data.ButtonText
-	if buttonText == "" {
-		buttonText = "Ver Menu"
-	}
-
-	// Build sections in legacy ListMessage format
-	var sections []*waE2E.ListMessage_Section
-	for _, sec := range data.Sections {
-		sectionTitle := sec.Title
-		if sectionTitle == "" {
-			sectionTitle = " "
-		}
-		var rows []*waE2E.ListMessage_Row
-		for i, r := range sec.Rows {
-			rowTitle := r.Title
-			if rowTitle == "" {
-				rowTitle = " "
-			}
-			rowId := r.RowId
-			if rowId == "" {
-				rowId = fmt.Sprintf("row_%d_%d", i, len(rows))
-			}
-			rows = append(rows, &waE2E.ListMessage_Row{
-				Title:       proto.String(rowTitle),
-				Description: proto.String(r.Description),
-				RowID:       proto.String(rowId),
-			})
-		}
-		sections = append(sections, &waE2E.ListMessage_Section{
-			Title: proto.String(sectionTitle),
-			Rows:  rows,
-		})
-	}
-
-	listType := waE2E.ListMessage_SINGLE_SELECT
-	listMessage := &waE2E.ListMessage{
-		Title:       proto.String(data.Title),
-		Description: proto.String(data.Description),
-		ButtonText:  proto.String(buttonText),
-		FooterText:  proto.String(data.FooterText),
-		ListType:    &listType,
-		Sections:    sections,
-	}
-
-	// Wrap ListMessage in DocumentWithCaptionMessage (Baileys PR #36) so modern WhatsApp renders it.
+	// El árbol lo decide INTERACTIVE_STYLE (ver interactive_builders.go):
+	//   legacy   → ListMessage en DocumentWithCaptionMessage + <biz><list v="2" type="single_select"/></biz>
+	//   viewonce → ViewOnce → InteractiveMessage → NativeFlow single_select + <biz><interactive native_flow/></biz>
 	// MessageSecret (32 random bytes) is required for iOS rendering.
-	listMsgSecret := make([]byte, 32)
-	_, _ = crypto_rand.Read(listMsgSecret)
+	style := s.interactiveStyle()
+	msg, msgType := buildListMessage(style, data, newMessageSecret())
+	bizNodes := listBizNodes(style, data.Number)
 
-	msg := &waE2E.Message{
-		DocumentWithCaptionMessage: &waE2E.FutureProofMessage{
-			Message: &waE2E.Message{
-				ListMessage: listMessage,
-			},
-		},
-		MessageContextInfo: &waE2E.MessageContextInfo{
-			MessageSecret: listMsgSecret,
-		},
-	}
-
-	// Build biz <list> node — required for mobile rendering of modern lists.
-	listBizNodes := []waBinary.Node{
-		{
-			Tag: "biz",
-			Content: []waBinary.Node{{
-				Tag: "list",
-				Attrs: waBinary.Attrs{
-					"v":    "2",
-					"type": "single_select",
-				},
-			}},
-		},
-	}
-	if !strings.Contains(data.Number, "@g.us") {
-		listBizNodes = append(listBizNodes, waBinary.Node{
-			Tag:   "bot",
-			Attrs: waBinary.Attrs{"biz_bot": "1"},
-		})
-	}
-
-	message, err := s.SendMessage(instance, msg, "ListMessage", &SendDataStruct{
+	message, err := s.SendMessage(instance, msg, msgType, &SendDataStruct{
 		Number:          data.Number,
 		Delay:           data.Delay,
 		MentionAll:      data.MentionAll,
 		MentionedJID:    data.MentionedJID,
 		FormatJid:       data.FormatJid,
 		Quoted:          data.Quoted,
-		AdditionalNodes: &listBizNodes,
+		AdditionalNodes: &bizNodes,
 	})
 
 	if err != nil {
@@ -2463,16 +2305,10 @@ func (s *sendService) SendMessage(instance *instance_model.Instance, msg *waE2E.
 				QuotedMessage: &waE2E.Message{Conversation: proto.String("")},
 			}
 		case "InteractiveMessage":
-			if msg.InteractiveMessage != nil {
-				msg.InteractiveMessage.ContextInfo = &waE2E.ContextInfo{
-					StanzaID:      proto.String(data.Quoted.MessageID),
-					Participant:   proto.String(data.Quoted.Participant),
-					QuotedMessage: &waE2E.Message{Conversation: proto.String("")},
-				}
-			} else if msg.DocumentWithCaptionMessage != nil &&
-				msg.DocumentWithCaptionMessage.Message != nil &&
-				msg.DocumentWithCaptionMessage.Message.InteractiveMessage != nil {
-				msg.DocumentWithCaptionMessage.Message.InteractiveMessage.ContextInfo = &waE2E.ContextInfo{
+			// Directo (carrusel), en DocumentWithCaptionMessage (pix/mixed) o en
+			// ViewOnceMessage (INTERACTIVE_STYLE=viewonce).
+			if im := interactiveOf(msg); im != nil {
+				im.ContextInfo = &waE2E.ContextInfo{
 					StanzaID:      proto.String(data.Quoted.MessageID),
 					Participant:   proto.String(data.Quoted.Participant),
 					QuotedMessage: &waE2E.Message{Conversation: proto.String("")},

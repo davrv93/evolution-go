@@ -101,6 +101,44 @@ benchmark; son lecturas de `docker stats`, cgroup y `pg_stat_activity`.
 | Pico de memoria cgroup | 97,9 MiB | 80,3 MiB de 128 MiB |
 | Conexiones PostgreSQL ociosas | 5 (`auth` 4 + `users` 1) | 3 (`auth` 2 + `users` 1) |
 
+## Botones y listas interactivas (`INTERACTIVE_STYLE`)
+
+`POST /send/button` con botones `reply` y `POST /send/list` admiten dos formas
+de armar el proto, elegidas con la variable de entorno `INTERACTIVE_STYLE`
+(`legacy` por defecto). Se lee en `pkg/config` y se aplica en
+`pkg/sendMessage/service/interactive_builders.go`; las funciones de
+construcción son puras y tienen pruebas sin red.
+
+Motivo: medido el 25-09-2026, el formato `legacy` devuelve 200 y whatsmeow lo
+entrega, pero el WhatsApp actual de Android **no pinta el mensaje** (ni texto
+ni botones) cuando lo manda una cuenta no oficial. `viewonce` replica lo que
+generan Baileys (`generateWAMessageContent` para `interactiveButtons`) y
+Evolution API v2, que hoy sí se ve en Android/iOS.
+
+| Estilo | `/send/button` (reply) | `/send/list` |
+|---|---|---|
+| `legacy` | `DocumentWithCaptionMessage → ButtonsMessage` + `MessageContextInfo{MessageSecret}` en la raíz. Nodo `<biz><interactive type="native_flow" v="1"><native_flow name="quick_reply"/></interactive></biz>`. | `DocumentWithCaptionMessage → ListMessage(SINGLE_SELECT)` + `MessageContextInfo{MessageSecret}` en la raíz. Nodo `<biz><list v="2" type="single_select"/></biz>`. |
+| `viewonce` | `ViewOnceMessage → Message{MessageContextInfo{DeviceListMetadata{}, DeviceListMetadataVersion:2, MessageSecret}, InteractiveMessage{Header{title}?, Body{description}, Footer{footer}?, NativeFlowMessage{Buttons:[quick_reply × N], MessageParamsJSON:""}}}`. Cada botón lleva `ButtonParamsJSON = {"display_text":…,"id":…}`. Mismo nodo `<biz>` que legacy. | Mismo sobre `ViewOnceMessage → InteractiveMessage` con **un** botón `single_select` cuyo `ButtonParamsJSON` es `{"title":<buttonText>,"sections":[{"title":…,"rows":[{"header":"","title":…,"description":…,"id":<rowId>}]}]}`. Nodo `<biz><interactive type="native_flow" v="1"><native_flow name="single_select"/></interactive></biz>`. |
+
+En los dos estilos, los chats 1:1 añaden `<bot biz_bot="1"/>` (los grupos no).
+En `viewonce`, si viene `imageUrl` / `videoUrl`, el medio va en
+`Header.Media` con `HasMediaAttachment=true` (el proto lo permite: `go doc
+waE2E.InteractiveMessage_Header`). `Info.Type` del evento `SendMessage` pasa a
+`InteractiveMessage` en `viewonce` (antes `ButtonsMessage` / `ListMessage`).
+
+La respuesta del cliente llega en ambos casos como
+`interactiveResponseMessage.nativeFlowResponseMessage.paramsJSON`:
+`{"id":…,"display_text":…}` para botón y `{"id":…,"title":…,"description":…}`
+para fila de lista. El evento `Message` la clasifica como `interactive response`
+(no se descarta) y el evento `ButtonClick` rellena `buttonText` con
+`display_text` o, si falta, con `title`.
+
+Riesgos conocidos de `viewonce`: WhatsApp Web / Escritorio puede no pintar
+interactivos dentro de `ViewOnceMessage`; iOS exige el `MessageSecret` (va
+puesto); los atributos exactos del nodo `<biz>` que usa Baileys cambian entre
+versiones y aquí se mantienen los del fork. Si un cliente deja de pintarlos,
+volver a `legacy` es sólo cambiar la variable y reiniciar.
+
 ## Compilar y probar
 
 Requiere Go 1.25 o posterior y PostgreSQL.

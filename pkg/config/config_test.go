@@ -26,6 +26,28 @@ func (*poolTestConn) Prepare(string) (driver.Stmt, error) { return nil, errors.N
 func (*poolTestConn) Close() error                        { return nil }
 func (*poolTestConn) Begin() (driver.Tx, error)           { return nil, errors.New("unused") }
 
+func TestParseInteractiveStyle(t *testing.T) {
+	cases := []struct {
+		raw   string
+		want  string
+		valid bool
+	}{
+		{"", InteractiveStyleLegacy, true},
+		{"legacy", InteractiveStyleLegacy, true},
+		{"  LEGACY ", InteractiveStyleLegacy, true},
+		{"viewonce", InteractiveStyleViewOnce, true},
+		{"ViewOnce", InteractiveStyleViewOnce, true},
+		{"view_once", InteractiveStyleLegacy, false},
+		{"modern", InteractiveStyleLegacy, false},
+	}
+	for _, tc := range cases {
+		got, ok := ParseInteractiveStyle(tc.raw)
+		if got != tc.want || ok != tc.valid {
+			t.Errorf("ParseInteractiveStyle(%q) = (%q, %v), want (%q, %v)", tc.raw, got, ok, tc.want, tc.valid)
+		}
+	}
+}
+
 func TestConfigurePostgresPoolBoundsOpenAndIdleConnections(t *testing.T) {
 	db := sql.OpenDB(poolTestConnector{})
 	defer db.Close()

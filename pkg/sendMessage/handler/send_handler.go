@@ -506,6 +506,10 @@ func (s *sendHandler) SendContact(ctx *gin.Context) {
 // @Description   - Do NOT mix `reply` with CTA buttons (`copy`/`url`/`call`) — the message will not appear on WhatsApp Web.
 // @Description
 // @Description Required body fields: `number`, `title`, `description`, `footer`, `buttons`.
+// @Description
+// @Description Wire format for `reply`-only messages is chosen by the `INTERACTIVE_STYLE` env var:
+// @Description   - `legacy` (default): `ButtonsMessage` inside `DocumentWithCaptionMessage`.
+// @Description   - `viewonce`: `ViewOnceMessage` → `InteractiveMessage` → NativeFlow `quick_reply` (Baileys / Evolution API v2 shape, rendered by current Android/iOS clients).
 // @Tags Send Message
 // @Accept json
 // @Produce json
@@ -567,7 +571,9 @@ func (s *sendHandler) SendButton(ctx *gin.Context) {
 // @Description Each section must contain one or more `rows`. When `rowId` is omitted, the server generates a fallback ID.
 // @Description When `buttonText` is empty, the server falls back to "Ver Menu".
 // @Description
-// @Description Uses legacy `ListMessage` format (no ViewOnceMessage wrapper) so it renders on iOS, Android and WhatsApp Web.
+// @Description Wire format is chosen by the `INTERACTIVE_STYLE` env var:
+// @Description   - `legacy` (default): `ListMessage` inside `DocumentWithCaptionMessage` (no ViewOnceMessage wrapper).
+// @Description   - `viewonce`: `ViewOnceMessage` → `InteractiveMessage` → NativeFlow `single_select` (Baileys / Evolution API v2 shape, rendered by current Android/iOS clients).
 // @Tags Send Message
 // @Accept json
 // @Produce json

@@ -51,6 +51,12 @@ const (
 	HISTORY_SYNC_DOWNLOAD   = "HISTORY_SYNC_DOWNLOAD"
 	WEBHOOK_TIMEOUT_SECONDS = "WEBHOOK_TIMEOUT_SECONDS"
 
+	// Forma del árbol proto de /send/button (reply) y /send/list:
+	// "legacy" (ButtonsMessage/ListMessage en DocumentWithCaptionMessage) o
+	// "viewonce" (ViewOnceMessage → InteractiveMessage → NativeFlow, como
+	// Baileys). Ver README, "Botones y listas interactivas".
+	INTERACTIVE_STYLE = "INTERACTIVE_STYLE"
+
 	// Logger configurations
 	LOG_MAX_SIZE    = "LOG_MAX_SIZE"
 	LOG_MAX_BACKUPS = "LOG_MAX_BACKUPS"

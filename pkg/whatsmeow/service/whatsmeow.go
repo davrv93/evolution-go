@@ -1654,30 +1654,22 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			}
 			mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] Button click detected (legacy): buttonId=%s, buttonText=%s", mycli.userID, resp.GetSelectedButtonID(), resp.GetSelectedDisplayText())
 		} else if resp := evt.Message.GetInteractiveResponseMessage(); resp != nil {
-			// NativeFlow interactive response (quick_reply, cta_url, cta_call, cta_copy)
+			// NativeFlow interactive response (quick_reply, cta_url, cta_call, cta_copy,
+			// single_select). paramsJSON trae id + display_text (botón) o id + title +
+			// description (fila de lista); ver parseNativeFlowReply.
 			if nf := resp.GetNativeFlowResponseMessage(); nf != nil {
-				buttonId := ""
-				buttonText := ""
-				// Parse paramsJSON to extract id and display_text
-				if nf.GetParamsJSON() != "" {
-					var params map[string]interface{}
-					if err := json.Unmarshal([]byte(nf.GetParamsJSON()), &params); err == nil {
-						if id, ok := params["id"].(string); ok {
-							buttonId = id
-						}
-						if dt, ok := params["display_text"].(string); ok {
-							buttonText = dt
-						}
-					}
-				}
+				reply := parseNativeFlowReply(nf.GetParamsJSON())
 				buttonClickData = map[string]interface{}{
-					"buttonId":   buttonId,
-					"buttonText": buttonText,
+					"buttonId":   reply.ID,
+					"buttonText": reply.Text,
 					"type":       "native_flow_response",
 					"name":       nf.GetName(),
 					"paramsJSON": nf.GetParamsJSON(),
 				}
-				mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] Button click detected (native_flow): name=%s, buttonId=%s, buttonText=%s", mycli.userID, nf.GetName(), buttonId, buttonText)
+				if reply.Description != "" {
+					buttonClickData["description"] = reply.Description
+				}
+				mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] Button click detected (native_flow): name=%s, buttonId=%s, buttonText=%s", mycli.userID, nf.GetName(), reply.ID, reply.Text)
 			}
 		} else if resp := evt.Message.GetTemplateButtonReplyMessage(); resp != nil {
 			// Template button reply
