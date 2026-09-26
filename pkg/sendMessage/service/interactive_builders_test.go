@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
 	config "github.com/evolution-foundation/evolution-go/pkg/config"
 	waBinary "go.mau.fi/whatsmeow/binary"
@@ -523,13 +524,13 @@ func nativeFlowBiz(name string) waBinary.Node {
 var botNode = waBinary.Node{Tag: "bot", Attrs: waBinary.Attrs{"biz_bot": "1"}}
 
 func TestReplyButtonsBizNodes(t *testing.T) {
-	got := replyButtonsBizNodes("51999999999@s.whatsapp.net")
+	got := replyButtonsBizNodes(config.InteractiveStyleLegacy, "51999999999@s.whatsapp.net")
 	want := []waBinary.Node{nativeFlowBiz("quick_reply"), botNode}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("1:1 biz nodes = %#v, want %#v", got, want)
 	}
 
-	got = replyButtonsBizNodes("120363000000000000@g.us")
+	got = replyButtonsBizNodes(config.InteractiveStyleLegacy, "120363000000000000@g.us")
 	want = []waBinary.Node{nativeFlowBiz("quick_reply")}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("group biz nodes = %#v, want %#v (no <bot>)", got, want)
@@ -556,14 +557,35 @@ func TestListBizNodes_Legacy(t *testing.T) {
 	}
 }
 
-func TestListBizNodes_ViewOnce(t *testing.T) {
-	got := listBizNodes(config.InteractiveStyleViewOnce, "51999999999")
-	want := []waBinary.Node{nativeFlowBiz("single_select"), botNode}
+func TestModernBizNodes(t *testing.T) {
+	ahora := time.Unix(1790380000, 0)
+	got := modernBizNodes("51999999999", ahora)
+	want := []waBinary.Node{{
+		Tag:   "biz",
+		Attrs: waBinary.Attrs{"actual_actors": "2", "host_storage": "2", "privacy_mode_ts": "1790380000"},
+		Content: []waBinary.Node{
+			{Tag: "engagement", Attrs: waBinary.Attrs{"customer_service_state": "open", "conversation_state": "open"}},
+			{Tag: "interactive", Attrs: waBinary.Attrs{"type": "native_flow", "v": "1"},
+				Content: []waBinary.Node{{Tag: "native_flow", Attrs: waBinary.Attrs{"v": "9", "name": "mixed"}}}},
+		},
+	}, botNode}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("viewonce list biz nodes = %#v, want %#v", got, want)
+		t.Fatalf("modern biz nodes = %#v, want %#v", got, want)
 	}
-	if n := len(listBizNodes(config.InteractiveStyleViewOnce, "x@g.us")); n != 1 {
+	if n := len(modernBizNodes("x@g.us", ahora)); n != 1 {
 		t.Fatalf("group must skip <bot>, got %d nodes", n)
+	}
+	// viewonce usa el nodo moderno en botones y listas; legacy no cambia.
+	for _, nodes := range [][]waBinary.Node{
+		listBizNodes(config.InteractiveStyleViewOnce, "51999999999"),
+		replyButtonsBizNodes(config.InteractiveStyleViewOnce, "51999999999"),
+	} {
+		if nodes[0].Tag != "biz" || nodes[0].Attrs["actual_actors"] != "2" {
+			t.Fatalf("viewonce debe usar el biz moderno: %#v", nodes[0])
+		}
+	}
+	if got := replyButtonsBizNodes(config.InteractiveStyleLegacy, "51999999999"); !reflect.DeepEqual(got, []waBinary.Node{nativeFlowBiz("quick_reply"), botNode}) {
+		t.Fatalf("legacy reply no cambia: %#v", got)
 	}
 }
 

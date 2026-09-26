@@ -1936,7 +1936,7 @@ func (s *sendService) SendButton(data *ButtonStruct, instance *instance_model.In
 	var bizNodes []waBinary.Node
 	var bizInteractiveContent waBinary.Node
 	if hasReply && !hasOtherTypes && !hasPix {
-		bizNodes = replyButtonsBizNodes(data.Number)
+		bizNodes = replyButtonsBizNodes(s.interactiveStyle(), data.Number)
 	} else if hasPix {
 		bizInteractiveContent = waBinary.Node{
 			Tag: "interactive",

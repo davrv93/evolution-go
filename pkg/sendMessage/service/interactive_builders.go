@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	config "github.com/evolution-foundation/evolution-go/pkg/config"
 	"go.mau.fi/whatsmeow"
@@ -400,16 +402,59 @@ func appendBotNode(nodes []waBinary.Node, number string) []waBinary.Node {
 	})
 }
 
-// replyButtonsBizNodes: iguales en los dos estilos (quick_reply).
-func replyButtonsBizNodes(number string) []waBinary.Node {
+// modernBizNodes es el <biz> que hoy hace VISIBLE un InteractiveMessage
+// (botones quick_reply y listas single_select) en Android/iOS:
+//
+//	<biz actual_actors="2" host_storage="2" privacy_mode_ts="<unix>">
+//	  <engagement customer_service_state="open" conversation_state="open"/>
+//	  <interactive type="native_flow" v="1"><native_flow v="9" name="mixed"/></interactive>
+//	</biz>
+//
+// Con el nodo anterior (native_flow sin v y con name quick_reply/
+// single_select) el servidor aceptaba el mensaje y el teléfono NO pintaba la
+// tarjeta: medido el 25-09-2026 (el titular pidió «muéstrame las opciones»
+// siete veces sobre listas entregadas). Es el nodo que inyectan los forks de
+// Baileys que sí se ven (Onigi v10.0.2, «fix invisible buttons/list»).
+func modernBizNodes(number string, ahora time.Time) []waBinary.Node {
+	nodes := []waBinary.Node{{
+		Tag: "biz",
+		Attrs: waBinary.Attrs{
+			"actual_actors":   "2",
+			"host_storage":    "2",
+			"privacy_mode_ts": strconv.FormatInt(ahora.Unix(), 10),
+		},
+		Content: []waBinary.Node{
+			{
+				Tag:   "engagement",
+				Attrs: waBinary.Attrs{"customer_service_state": "open", "conversation_state": "open"},
+			},
+			{
+				Tag:   "interactive",
+				Attrs: waBinary.Attrs{"type": "native_flow", "v": "1"},
+				Content: []waBinary.Node{{
+					Tag:   "native_flow",
+					Attrs: waBinary.Attrs{"v": "9", "name": "mixed"},
+				}},
+			},
+		},
+	}}
+	return appendBotNode(nodes, number)
+}
+
+// replyButtonsBizNodes: legacy → native_flow name="quick_reply" (lo de
+// siempre); viewonce → modernBizNodes.
+func replyButtonsBizNodes(style, number string) []waBinary.Node {
+	if style == config.InteractiveStyleViewOnce {
+		return modernBizNodes(number, time.Now())
+	}
 	return nativeFlowBizNodes(nativeFlowQuickReply, number)
 }
 
 // listBizNodes: legacy → <biz><list v="2" type="single_select"/></biz>;
-// viewonce → native_flow name="single_select". Ambos con <bot> en 1:1.
+// viewonce → modernBizNodes. Ambos con <bot> en 1:1.
 func listBizNodes(style, number string) []waBinary.Node {
 	if style == config.InteractiveStyleViewOnce {
-		return nativeFlowBizNodes(nativeFlowSingleSelect, number)
+		return modernBizNodes(number, time.Now())
 	}
 	nodes := []waBinary.Node{{
 		Tag: "biz",
