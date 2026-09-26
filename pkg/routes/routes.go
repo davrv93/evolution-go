@@ -260,6 +260,7 @@ func (r *Routes) AssignRoutes(eng *gin.Engine) {
 			routes.POST("/:id/pausar", r.flowHandler.Pausar)
 			routes.POST("/probar", r.flowHandler.Probar)
 			routes.POST("/:id/probar", r.flowHandler.Probar)
+			routes.POST("/:id/enviar", r.flowHandler.Enviar)
 			routes.GET("/:id/runs", r.flowHandler.Runs)
 		}
 	}

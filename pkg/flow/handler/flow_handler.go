@@ -2,6 +2,7 @@ package flow_handler
 
 import (
 	"net/http"
+	"time"
 
 	instance_model "github.com/evolution-foundation/evolution-go/pkg/instance/model"
 	flow_model "github.com/evolution-foundation/evolution-go/pkg/flow/model"
@@ -20,6 +21,7 @@ type FlowHandler interface {
 	Pausar(ctx *gin.Context)
 	Probar(ctx *gin.Context)
 	Runs(ctx *gin.Context)
+	Enviar(ctx *gin.Context)
 }
 
 type flowHandler struct {
@@ -225,4 +227,44 @@ func (h *flowHandler) Runs(ctx *gin.Context) {
 		return
 	}
 	ctx.JSON(http.StatusOK, gin.H{"data": runs})
+}
+
+type envioEntrada struct {
+	Remitentes []string `json:"remitentes"`
+	// PausaMs entre envíos (fábrica 1000): no castigar la línea con ráfagas.
+	PausaMs int `json:"pausa_ms"`
+}
+
+// Enviar dispara el flujo a una lista (encuesta saliente). Solo flujos
+// activos, máx. 200 remitentes por llamada. Devuelve el conteo.
+func (h *flowHandler) Enviar(ctx *gin.Context) {
+	inst, ok := instanciaDe(ctx)
+	if !ok {
+		return
+	}
+	c := ctx.Request.Context()
+	def, err := h.repo.DefPorID(c, ctx.Param("id"), inst.Id)
+	if err != nil {
+		ctx.JSON(http.StatusNotFound, gin.H{"error": "flujo no encontrado"})
+		return
+	}
+	if def.Estado != flow_model.EstadoActivo {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "solo se puede enviar un flujo activo"})
+		return
+	}
+	var in envioEntrada
+	if err := ctx.ShouldBindBodyWithJSON(&in); err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if len(in.Remitentes) == 0 || len(in.Remitentes) > 200 {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "de 1 a 200 remitentes por envío"})
+		return
+	}
+	pausa := time.Second
+	if in.PausaMs > 0 && in.PausaMs <= 10000 {
+		pausa = time.Duration(in.PausaMs) * time.Millisecond
+	}
+	cuenta := h.svc.Enviar(c, inst, def, in.Remitentes, pausa)
+	ctx.JSON(http.StatusOK, gin.H{"message": "success", "data": cuenta})
 }

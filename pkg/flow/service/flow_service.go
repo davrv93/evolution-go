@@ -134,6 +134,10 @@ type FlowService interface {
 	Evaluar(ctx context.Context, inst *instance_model.Instance, remitente, texto, botonID string) (bool, error)
 	ValidarDefinicion(def Definicion) error
 	VistaPrevia(def Definicion) ([]map[string]string, error)
+	// Enviar dispara el flujo a una lista (encuesta saliente). Devuelve el
+	// conteo por resultado. Los vetados y los que ya tienen run no reciben
+	// nada; los inválidos ni se intentan.
+	Enviar(ctx context.Context, inst *instance_model.Instance, d *flow_model.FlowDef, remitentes []string, pausa time.Duration) map[string]int
 	SetTTL(d time.Duration)
 	SetLog(log Logger)
 }
@@ -252,21 +256,90 @@ func (s *flowService) disparar(ctx context.Context, inst *instance_model.Instanc
 		if err := json.Unmarshal(d.Steps, &def); err != nil {
 			continue // definición corrupta: no se consume, sigue el curso normal
 		}
-		run := &flow_model.FlowRun{
-			FlowID: d.Id, InstanceID: inst.Id, Remitente: remitente,
-			StepActual: def.Inicio, Contexto: json.RawMessage(`{}`), Estado: flow_model.RunEnCurso,
-		}
-		tocarRun(run)
-		if err := s.repo.CrearRun(ctx, run); err != nil {
-			return false, err
-		}
-		s.bitacora("disparo flujo %s (%s) para %s", d.Id, d.Nombre, remitente)
-		if err := s.ejecutarDesde(ctx, inst, d, &def, run, "", ""); err != nil {
-			return true, err
+		consumido, err := s.iniciar(ctx, inst, d, &def, remitente)
+		if err != nil || !consumido {
+			return consumido, err
 		}
 		return true, nil
 	}
 	return false, nil
+}
+
+// iniciar crea el run en el paso inicial y lo ejecuta. Devuelve false sin
+// error cuando hay veto de baja. La usan el entrante y el envío saliente.
+func (s *flowService) iniciar(ctx context.Context, inst *instance_model.Instance, d *flow_model.FlowDef, def *Definicion, remitente string) (bool, error) {
+	run := &flow_model.FlowRun{
+		FlowID: d.Id, InstanceID: inst.Id, Remitente: remitente,
+		StepActual: def.Inicio, Contexto: json.RawMessage(`{}`), Estado: flow_model.RunEnCurso,
+	}
+	tocarRun(run)
+	if err := s.repo.CrearRun(ctx, run); err != nil {
+		return false, err
+	}
+	s.bitacora("disparo flujo %s (%s) para %s", d.Id, d.Nombre, remitente)
+	if err := s.ejecutarDesde(ctx, inst, d, def, run, "", ""); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+var reNoDigitos = regexp.MustCompile(`[^0-9]+`)
+
+// numeroLimpio deja solo dígitos y exige de 8 a 15 (E.164 sin +).
+func numeroLimpio(numero string) string {
+	d := reNoDigitos.ReplaceAllString(numero, "")
+	if len(d) < 8 || len(d) > 15 {
+		return ""
+	}
+	return d
+}
+
+func (s *flowService) Enviar(ctx context.Context, inst *instance_model.Instance, d *flow_model.FlowDef, remitentes []string, pausa time.Duration) map[string]int {
+	cuenta := map[string]int{"enviados": 0, "vetados": 0, "activos": 0, "invalidos": 0, "fallos": 0}
+	var def Definicion
+	if err := json.Unmarshal(d.Steps, &def); err != nil {
+		cuenta["fallos"] = len(remitentes)
+		return cuenta
+	}
+	vistos := map[string]bool{}
+	for _, crudo := range remitentes {
+		numero := numeroLimpio(crudo)
+		if numero == "" || vistos[numero] {
+			cuenta["invalidos"]++
+			continue
+		}
+		vistos[numero] = true
+		if run, err := s.repo.RunActivo(ctx, inst.Id, numero); err == nil && run != nil {
+			cuenta["activos"]++
+			continue
+		}
+		if s.cb != nil {
+			resp, err := s.cb(ctx, "permiso", map[string]any{"instancia": inst.Id, "remitente": numero})
+			if err != nil || resp == nil {
+				s.bitacora("envío: permiso sin respuesta para %s", numero)
+				cuenta["fallos"]++
+				continue
+			}
+			if ok, _ := resp["ok"].(bool); !ok {
+				cuenta["vetados"]++
+				continue
+			}
+		}
+		if _, err := s.iniciar(ctx, inst, d, &def, numero); err != nil {
+			cuenta["fallos"]++
+			continue
+		}
+		cuenta["enviados"]++
+		if pausa > 0 {
+			select {
+			case <-ctx.Done():
+				return cuenta
+			case <-time.After(pausa):
+			}
+		}
+	}
+	s.bitacora("envío flujo %s: %+v", d.Id, cuenta)
+	return cuenta
 }
 
 func (s *flowService) continuar(ctx context.Context, inst *instance_model.Instance, remitente string, run *flow_model.FlowRun, texto, botonID string) (bool, error) {
@@ -322,6 +395,11 @@ func (s *flowService) continuar(ctx context.Context, inst *instance_model.Instan
 				sig = o.IrA
 				break
 			}
+		}
+		if sig != "" {
+			// La elección queda en el contexto: es el dato de la encuesta.
+			ctxVars["opcion_"+paso.Clave] = id
+			run.Contexto = guardarContexto(ctxVars)
 		}
 		if sig == "" {
 			// No eligió una alternativa válida: se repite el paso tal cual.
