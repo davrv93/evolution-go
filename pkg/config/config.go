@@ -16,10 +16,24 @@ import (
 	config_env "github.com/evolution-foundation/evolution-go/pkg/config/env"
 )
 
+// Tope de cada pool (hay dos: auth y users). Se puede bajar con
+// POSTGRES_MAX_OPEN_CONNS / POSTGRES_MAX_IDLE_CONNS cuando la base es
+// compartida: en PjgFactSalud vive dentro del Postgres de una botica, cuyo
+// max_connections=30 también sirve a Laravel y al pod.
 const (
 	postgresMaxOpenConns = 10
 	postgresMaxIdleConns = 2
 )
+
+func poolLimit(name string, def int) int {
+	if raw := os.Getenv(name); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			return n
+		}
+		logger.LogWarn("[CONFIG] %s=%q inválido, se usa %d", name, raw, def)
+	}
+	return def
+}
 
 // Valores admitidos de INTERACTIVE_STYLE: cómo se arma el proto de los
 // botones de respuesta (/send/button) y de las listas (/send/list).
@@ -50,8 +64,13 @@ func ParseInteractiveStyle(raw string) (string, bool) {
 // ConfigurePostgresPool bounds each pool. Evolution Go opens separate pools
 // for auth and application data, so large defaults multiply per service.
 func ConfigurePostgresPool(db *sql.DB) {
-	db.SetMaxOpenConns(postgresMaxOpenConns)
-	db.SetMaxIdleConns(postgresMaxIdleConns)
+	maxOpen := poolLimit("POSTGRES_MAX_OPEN_CONNS", postgresMaxOpenConns)
+	maxIdle := poolLimit("POSTGRES_MAX_IDLE_CONNS", postgresMaxIdleConns)
+	if maxIdle > maxOpen {
+		maxIdle = maxOpen
+	}
+	db.SetMaxOpenConns(maxOpen)
+	db.SetMaxIdleConns(maxIdle)
 	db.SetConnMaxLifetime(5 * time.Minute)
 	db.SetConnMaxIdleTime(time.Minute)
 }
