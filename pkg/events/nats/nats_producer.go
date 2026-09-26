@@ -20,6 +20,14 @@ func NewNatsProducer(
 	natsGlobalEvents []string,
 	loggerWrapper *logger_wrapper.LoggerManager,
 ) producer_interfaces.Producer {
+	// Sin NATS_URL no se intenta conectar: nats.Connect("") no significa
+	// «apagado» sino nats://127.0.0.1:4222, así que cada arranque probaba
+	// un servidor que no existe (y se engancharía a cualquiera que escuchara
+	// ahí). El resultado es el mismo que un fallo de conexión: conn nil.
+	if url == "" {
+		return &natsProducer{loggerWrapper: loggerWrapper}
+	}
+
 	conn, err := nats.Connect(url)
 	if err != nil {
 		logger.LogError("Failed to connect to NATS: %v", err)

@@ -35,8 +35,11 @@ func newProcessedMessageCache(maxKeys int, ttl time.Duration) *processedMessageC
 	return &processedMessageCache{
 		ttl:     ttl,
 		maxKeys: maxKeys,
-		items:   make(map[string]time.Time, maxKeys),
-		order:   list.New(),
+		// Sin capacidad inicial a propósito: reservar maxKeys (10.000) de
+		// entrada costaba ~770 KB de heap vivo en reposo, sin sesión y sin
+		// un solo mensaje. El tope lo impone HasOrAdd, no el tamaño del mapa.
+		items: make(map[string]time.Time),
+		order: list.New(),
 	}
 }
 

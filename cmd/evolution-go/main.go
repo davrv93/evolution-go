@@ -20,7 +20,6 @@ import (
 	"github.com/joho/godotenv"
 	"go.mau.fi/whatsmeow"
 	"gorm.io/gorm"
-	_ "modernc.org/sqlite"
 
 	call_handler "github.com/evolution-foundation/evolution-go/pkg/call/handler"
 	call_service "github.com/evolution-foundation/evolution-go/pkg/call/service"
@@ -30,9 +29,6 @@ import (
 	community_service "github.com/evolution-foundation/evolution-go/pkg/community/service"
 	config "github.com/evolution-foundation/evolution-go/pkg/config"
 	"github.com/evolution-foundation/evolution-go/pkg/core"
-	producer_interfaces "github.com/evolution-foundation/evolution-go/pkg/events/interfaces"
-	nats_producer "github.com/evolution-foundation/evolution-go/pkg/events/nats"
-	rabbitmq_producer "github.com/evolution-foundation/evolution-go/pkg/events/rabbitmq"
 	webhook_producer "github.com/evolution-foundation/evolution-go/pkg/events/webhook"
 	websocket_producer "github.com/evolution-foundation/evolution-go/pkg/events/websocket"
 	group_handler "github.com/evolution-foundation/evolution-go/pkg/group/handler"
@@ -60,11 +56,9 @@ import (
 	send_service "github.com/evolution-foundation/evolution-go/pkg/sendMessage/service"
 	server_handler "github.com/evolution-foundation/evolution-go/pkg/server/handler"
 	storage_interfaces "github.com/evolution-foundation/evolution-go/pkg/storage/interfaces"
-	minio_storage "github.com/evolution-foundation/evolution-go/pkg/storage/minio"
 	user_handler "github.com/evolution-foundation/evolution-go/pkg/user/handler"
 	user_service "github.com/evolution-foundation/evolution-go/pkg/user/service"
 	whatsmeow_service "github.com/evolution-foundation/evolution-go/pkg/whatsmeow/service"
-	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 var devMode = flag.Bool("dev", false, "Enable development mode")
@@ -107,51 +101,19 @@ func init() {
 	}
 }
 
-func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.Config, conn *amqp.Connection, exPath string) *gin.Engine {
+func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.Config, conn rabbitConn, exPath string) *gin.Engine {
 	killChannel := make(map[string](chan bool))
 	clientPointer := make(map[string]*whatsmeow.Client)
 
 	loggerWrapper := logger_wrapper.NewLoggerManager(config)
 
-	var rabbitmqProducer producer_interfaces.Producer
-	if conn != nil {
-		logger.LogInfo("RabbitMQ enabled")
-		rabbitmqProducer = rabbitmq_producer.NewRabbitMQProducer(
-			conn,
-			config.AmqpGlobalEnabled,
-			config.AmqpGlobalEvents,
-			config.AmqpSpecificEvents,
-			config.AmqpUrl,
-			loggerWrapper,
-		)
-	} else {
-		// Even if initial connection failed, pass the URL so reconnection can work
-		rabbitmqProducer = rabbitmq_producer.NewRabbitMQProducer(
-			nil,
-			config.AmqpGlobalEnabled,
-			config.AmqpGlobalEvents,
-			config.AmqpSpecificEvents,
-			config.AmqpUrl, // Keep the URL for reconnection attempts
-			loggerWrapper,
-		)
-	}
+	// RabbitMQ y NATS se crean en amqp_*.go / nats_*.go: con las etiquetas
+	// `noamqp` / `nonats` sus clientes quedan fuera del binario.
+	rabbitmqProducer := newRabbitMQProducer(conn, config, loggerWrapper)
 
-	var natsProducer producer_interfaces.Producer
-	if config.NatsUrl != "" {
-		logger.LogInfo("NATS enabled")
-		natsProducer = nats_producer.NewNatsProducer(
-			config.NatsUrl,
-			config.NatsGlobalEnabled,
-			config.NatsGlobalEvents,
-			loggerWrapper,
-		)
-	} else {
-		natsProducer = nats_producer.NewNatsProducer(
-			"",
-			false,
-			nil,
-			loggerWrapper,
-		)
+	natsProducer, err := newNatsProducer(config, loggerWrapper)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	webhookProducer := webhook_producer.NewWebhookProducer(config.WebhookUrl, config.WebhookTimeout, loggerWrapper)
@@ -168,16 +130,8 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 	}
 
 	var mediaStorage storage_interfaces.MediaStorage
-	var err error
 	if config.MinioEnabled {
-		mediaStorage, err = minio_storage.NewMinioMediaStorage(
-			config.MinioEndpoint,
-			config.MinioAccessKey,
-			config.MinioSecretKey,
-			config.MinioBucket,
-			config.MinioRegion,
-			config.MinioUseSSL,
-		)
+		mediaStorage, err = newMinioMediaStorage(config)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -319,6 +273,9 @@ func initAuthDB(config *config.Config) (*sql.DB, string, error) {
 	if config.PostgresAuthDB != "" {
 		return nil, "", nil
 	}
+	if !sqliteCompiled {
+		return nil, "", fmt.Errorf("binario compilado con -tags nosqlite: defina POSTGRES_AUTH_DB (la sesión de WhatsApp no puede ir a SQLite)")
+	}
 
 	ex, err := os.Executable()
 	if err != nil {
@@ -418,33 +375,8 @@ func main() {
 		log.Fatal("Failed to migrate runtime_configs: ", err)
 	}
 
-	var conn *amqp.Connection
-
-	if cfg.AmqpUrl != "" {
-		logger.LogInfo("Attempting to connect to RabbitMQ...")
-
-		// Create connection with heartbeat to prevent timeouts
-		amqpConfig := amqp.Config{
-			Heartbeat: 30 * time.Second, // Send heartbeat every 30 seconds
-			Locale:    "en_US",
-		}
-
-		conn, err = amqp.DialConfig(cfg.AmqpUrl, amqpConfig)
-		if err != nil {
-			logger.LogError("Failed to connect to RabbitMQ, err: %v", err)
-			logger.LogInfo("RabbitMQ producer will be created with reconnection capability")
-		} else {
-			logger.LogInfo("Successfully connected to RabbitMQ with heartbeat enabled")
-			defer func(conn *amqp.Connection) {
-				err := conn.Close()
-				if err != nil {
-					logger.LogError("Failed to close RabbitMQ connection, err: %v", err)
-				}
-			}(conn)
-		}
-	} else {
-		logger.LogInfo("RabbitMQ URL not configured, skipping RabbitMQ connection")
-	}
+	conn, closeRabbitMQ := dialRabbitMQ(cfg)
+	defer closeRabbitMQ()
 
 	r := setupRouter(db, authDB, sqliteDB, cfg, conn, exPath)
 

@@ -44,8 +44,29 @@ Valores configurados en el Compose de producción:
   goroutine, socket y payload indefinidamente por evento y reintento.
 - `/message/downloadmedia` codifica el base64 directamente sobre la respuesta:
   el pico pasa de ~4x el tamaño del medio a ~1x. Mismo JSON byte a byte.
-- Imagen: `-trimpath -ldflags "-s -w" -tags noswagger` (binario de 64,7 MB a
-  35,1 MB). Swagger vuelve con `--build-arg GO_TAGS=""`.
+- Imagen: `-trimpath -ldflags "-s -w"` y las etiquetas
+  `noswagger nosqlite nomsgpack nominio nonats noamqp` (binario de 64,7 MB a
+  35,1 MB con `noswagger`, y a 27,8 MB con el resto). Cada etiqueta quita del
+  binario algo que esta instalación no usa **y** el heap que su `init()`
+  reservaba al arrancar aunque estuviera apagado:
+  - `nosqlite`: driver SQLite (modernc, libc transpilada). La sesión va a
+    `POSTGRES_AUTH_DB`, que pasa a ser obligatorio.
+  - `nomsgpack`: códec msgpack de gin (etiqueta oficial de gin).
+  - `nominio`: cliente MinIO/S3. Arrastraba `goccy/go-json`, cuyo `init()`
+    reservaba ~2 MB de cachés de tipos en el heap de Linux: la mayor partida
+    del heap vivo en reposo.
+  - `nonats` / `noamqp`: clientes NATS y RabbitMQ.
+
+  Si se enciende una de esas funciones (`MINIO_ENABLED=true`, `NATS_URL`,
+  `AMQP_URL`, o `POSTGRES_AUTH_DB` vacío) con este binario, **el arranque
+  falla** con un mensaje que dice qué etiqueta quitar; nunca pierde eventos en
+  silencio. Todo vuelve con `--build-arg GO_TAGS=""` (o `go build` a secas).
+- Cachés de mensajes procesados y de LID sin capacidad reservada: se reservaban
+  10.000 y 2×4.096 huecos al arrancar (~1,2 MB de heap vivo con cero
+  mensajes). Crecen al usarse; el tope sigue siendo el mismo.
+- Sin `NATS_URL` ya no se intenta conectar: `nats.Connect("")` significaba
+  `nats://127.0.0.1:4222`, no «apagado» (de ahí el `Failed to connect to NATS`
+  de cada arranque).
 
 ### Mediciones
 
@@ -67,6 +88,61 @@ después. La bajada en reposo la explica quitar Swagger (−9,1 MB medidos
 aislando la variable); `-s -w` solo encoge el binario. El efecto de `GOGC=50`
 y de no descargar el HistorySync **solo aparece con una sesión vinculada**, que
 aquí no hay: el heap vivo en reposo sin sesión es demasiado pequeño para verlo.
+
+Segunda tanda, 25-09-2026 por la noche, mismo método y mismo Mac; se vuelve a
+medir el estado anterior porque el Mac tenía otra presión de memoria:
+
+| Estado | Binario | RSS reposo 60 s | RSS tras carga | RSS 20 s después | Physical footprint |
+|---|---:|---:|---:|---:|---:|
+| Antes de esta tanda (`bf63c71`, `noswagger`) | 35,1 MB | 16,8 MB | 31,1 MB | 17,8 MB | 15,2 MB |
+| Etiquetas `nosqlite nomsgpack nominio nonats noamqp` + cachés sin reserva | 27,8 MB | **15,0 MB** | 25,4 MB | 16,1 MB | **10,8 MB** |
+
+En macOS el `ps -o rss` de un proceso ocioso es sobre todo **binario mapeado**:
+el sistema comprime las páginas anónimas (heap) y el RSS que queda son páginas
+de `__TEXT` (~10 MB tocadas de 23 MB) y `__DATA_CONST` (3,7 MB, residente
+entero porque dyld reubica cada puntero de los descriptores de tipos). Por eso
+aquí baja poco y el `Physical footprint` de `vmmap -summary` (memoria sucia
+propia, comprimida o no) es la cifra que refleja el heap.
+
+**Linux, imagen real** (Dockerfile, Go 1.25.0, alpine, `--cpuset-cpus 0,1`
+como el EC2 de 2 vCPU, `--memory 128m`, Postgres efímero, 0 instancias,
+lectura a los 60 s; tres rondas por estado):
+
+| Estado | Binario | `docker stats` | `memory.current` | RssAnon | VmRSS | Heap vivo (`HeapAlloc`) |
+|---|---:|---:|---:|---:|---:|---:|
+| Antes (`bf63c71`) | 28,3 MB | 8,3–8,6 MiB | 8,8–9,2 MiB | 7,4 MB | 27,8 MB | 6,0 MB |
+| Esta versión | 22,1 MB | **6,5–6,6 MiB** | 6,9–7,2 MiB | 5,8 MB | 22,9 MB | 2,7 MB |
+| Esta versión, caché de páginas fría | 22,1 MB | 27,1–27,7 MiB | — | — | 24,7–25,3 MB | — |
+| Antes, caché de páginas fría | 28,3 MB | 32,8–35,6 MiB | — | — | 29,8–32,2 MB | — |
+
+`docker stats` es la memoria anónima del cgroup más la caché de páginas
+**que se le haya cobrado**. Normalmente el binario lo leyó quien bajó o
+construyó la imagen y no se cobra al contenedor (filas 1 y 2). Si la caché se
+vacía (reinicio del servidor, presión de memoria) el contenedor relee el
+binario y se lo cobra: filas «fría», medidas vaciando la caché de la VM de
+Docker antes de arrancar. Ahí el tamaño del binario sí cuenta en producción.
+
+Qué cambió, medido aislando cada paso (Linux, `docker stats` en reposo):
+cachés sin reserva −1,2 MB de anónima; `nosqlite` −0,1 MiB de anónima y −1 MB de
+binario mapeado (en macOS eran 1,7 MB de heap: netdb de la libc transpilada);
+`nomsgpack` −0,7 MB de binario; `nominio` −0,4 MiB de anónima (los ~2 MB que
+`goccy/go-json` reservaba casi no se tocaban, así que pesaban poco en RSS) y
+−2,1 MB de binario; `nonats` + `noamqp` −1,1 MB de binario.
+`debug.FreeOSMemory()` al arrancar no gana nada (el scavenger ya
+devolvió el 97 % del heap ocioso) y `GOMEMLIMIT=32MiB` tampoco en reposo.
+`GOGC=100` da 0,5 MB menos en reposo que `GOGC=50`, pero se mantiene 50 porque
+su efecto útil es con sesión y carga, que aquí no se mide.
+
+Qué queda y por qué no baja de ahí: el heap vivo (2,7 MB) son `init()` de
+dependencias que sí se usan —descriptores protobuf de whatsmeow (~0,5 MB),
+validator de gin (~0,3 MB), regex de `inflection` de gorm (~0,25 MB),
+`x/net/html`, tipos de pgx—; el resto de la anónima es el runtime (metadatos
+del GC, pilas, 7 hilos). Programas mínimos compilados aparte lo acotan: sólo
+whatsmeow + `lib/pq` ocioso son 7,0 MB de RSS en macOS y 3,8 MB de RssAnon en
+Linux; añadiendo gin + gorm/pgx, 10,3 MB y 5,2 MB. Bajar de ahí exige quitar
+gin (a `net/http`) y gorm+pgx (a `database/sql` + `lib/pq`): ~−1,4 MB de
+anónima y ~−3 MB de RSS en macOS, a cambio de reescribir 85 rutas, 71
+llamadas a `ShouldBind*`/`BindJSON` y los repositorios gorm.
 
 ### Producción (EC2 3.130.244.177, 25-09-2026)
 
@@ -151,6 +227,15 @@ go build ./cmd/evolution-go
 
 Swagger está disponible en `/swagger/index.html` cuando el servicio se compila
 sin la etiqueta `noswagger` (la imagen de producción la lleva puesta).
+`go build` a secas compila todo (SQLite, MinIO, NATS, RabbitMQ, Swagger); la
+imagen usa `GO_TAGS="noswagger nosqlite nomsgpack nominio nonats noamqp"`
+(ver «Perfil de recursos»).
+
+Para medir memoria hay una build de diagnóstico que **nunca** entra en la
+imagen: `-tags pprofdiag` abre pprof y `/debug/memstats` en
+`127.0.0.1:$PPROF_PORT` (6061 por defecto; `?gc=1` fuerza un GC, `?free=1`
+llama a `debug.FreeOSMemory`). Con `GODEBUG=memprofilerate=1` el perfil del
+heap cuenta cada asignación, incluidas las de los `init()`.
 El despliegue de PjgFactSalud se coordina en el
 [repositorio de la aplicación](https://github.com/davrv93/pjgfarma).
 

@@ -15,9 +15,19 @@ RUN go mod download
 COPY . .
 
 ARG VERSION=dev
-# `noswagger` deja fuera del binario la UI y el spec de Swagger (~10 MB de
-# binario; Laravel no los usa). Para volver a tenerlos: --build-arg GO_TAGS="".
-ARG GO_TAGS=noswagger
+# Etiquetas que dejan fuera del binario lo que esta instalación no usa (ver
+# README, «Perfil de recursos»). Cada una quita código Y el heap que su init()
+# reserva al arrancar, aunque la función esté apagada:
+#   noswagger  UI y spec de Swagger (~10 MB de binario; Laravel no los usa).
+#   nosqlite   driver SQLite: la sesión va a POSTGRES_AUTH_DB (obligatorio).
+#   nomsgpack  códec msgpack de gin (etiqueta oficial de gin); nadie lo pide.
+#   nominio    cliente MinIO/S3 (MINIO_ENABLED=false); arrastraba goccy/go-json,
+#              que reservaba ~2 MB de heap en Linux al arrancar.
+#   nonats     cliente NATS (sin NATS_URL).
+#   noamqp     cliente RabbitMQ (sin AMQP_URL).
+# Si se enciende una de esas funciones con el binario sin ella, el arranque
+# falla con un mensaje claro. Para compilarlo todo: --build-arg GO_TAGS="".
+ARG GO_TAGS="noswagger nosqlite nomsgpack nominio nonats noamqp"
 # -trimpath y -s -w quitan rutas de compilación, tabla de símbolos y DWARF:
 # menos imagen y menos páginas que mapear; no cambian el comportamiento.
 RUN CGO_ENABLED=1 go build -trimpath -tags "${GO_TAGS}" \

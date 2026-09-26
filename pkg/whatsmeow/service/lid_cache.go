@@ -36,8 +36,11 @@ func newLIDPairCache(capacity int) *lidPairCache {
 	return &lidPairCache{
 		capacity: capacity,
 		order:    list.New(),
-		byPN:     make(map[string]*list.Element, capacity),
-		byLID:    make(map[string]*list.Element, capacity),
+		// Sin capacidad inicial: dos mapas de 4.096 huecos eran ~430 KB de
+		// heap vivo desde el arranque, con cero contactos. Crecen al usarse
+		// y put() mantiene el tope de capacity.
+		byPN:  make(map[string]*list.Element),
+		byLID: make(map[string]*list.Element),
 	}
 }
 
